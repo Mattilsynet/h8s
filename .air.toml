@@ -1,0 +1,16 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "go build ./cmd/h8sd"
+  bin = "./h8sd"
+  include_ext = ["go", "templ", "yaml"]
+  exclude_regex = [ "_test.go", "_templ.go"]
+
+[log]
+  time = true
+
+[proxy]
+  enabled = true
+  proxy_port = 3001
+  app_port = 8080 
