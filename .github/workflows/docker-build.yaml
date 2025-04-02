@@ -37,4 +37,3 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: ghcr.io/mattilsynet/h8sd:latest
-          P
