@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Mattilsynet/h8s/pkg/subjectmapper"
 	"github.com/gorilla/websocket"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
@@ -49,6 +50,7 @@ func TestHttpReqToNATS_RequestReply_HeaderPropagation(t *testing.T) {
 		method          string
 		host            string
 		path            string
+		scheme          string
 		headers         http.Header
 		expectedReply   []byte
 		expectedHeaders map[string]string // key: header name, value: expected value
@@ -57,6 +59,7 @@ func TestHttpReqToNATS_RequestReply_HeaderPropagation(t *testing.T) {
 			name:          "GET with X-Test header",
 			method:        "GET",
 			host:          "api.example.io",
+			scheme:        "http",
 			path:          "/ping",
 			headers:       http.Header{"X-Test": []string{"true"}, "X-Env": []string{"staging"}},
 			expectedReply: []byte("pong"),
@@ -69,9 +72,10 @@ func TestHttpReqToNATS_RequestReply_HeaderPropagation(t *testing.T) {
 			name:          "POST with Authorization header",
 			method:        "POST",
 			host:          "service.internal",
-			path:          "/submit/data",
+			scheme:        "http",
+			path:          "/submit/data/test",
 			headers:       http.Header{"Authorization": []string{"Bearer abc123"}},
-			expectedReply: []byte("ack"),
+			expectedReply: []byte("pong"),
 			expectedHeaders: map[string]string{
 				"Authorization": "Bearer abc123",
 			},
@@ -80,9 +84,21 @@ func TestHttpReqToNATS_RequestReply_HeaderPropagation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			subject := "h8s." + tt.method + "." + reverseHost(tt.host) + "." + pathSegments(tt.path)
+			rm := subjectmapper.NewSubjectMap(&http.Request{
+				Host:   tt.host,
+				Header: tt.headers,
+				Method: tt.method,
+				URL: &url.URL{
+					Scheme: tt.scheme,
+					Path:   tt.path,
+				},
+			})
 
-			// Set up a responder that checks headers and replies
+			subject := rm.PublishSubject()
+			t.Log("Subscribing on NATS subject:", subject)
+			// subject := "h8s." + tt.method + "." + urltosub.ReverseHost(tt.host) + "." + urltosub.PathSegments(tt.path)
+
+			// Set up a responder(subscriber) that checks headers and replies
 			_, err := nc.Subscribe(subject, func(msg *nats.Msg) {
 				for key, expected := range tt.expectedHeaders {
 					got := msg.Header.Get(key)
@@ -95,6 +111,7 @@ func TestHttpReqToNATS_RequestReply_HeaderPropagation(t *testing.T) {
 			})
 			require.NoError(t, err)
 
+			// Build the synthetic request
 			reqURL, _ := url.Parse("http://" + tt.host + tt.path)
 			req := &http.Request{
 				Method: tt.method,
@@ -102,13 +119,10 @@ func TestHttpReqToNATS_RequestReply_HeaderPropagation(t *testing.T) {
 				URL:    reqURL,
 				Header: tt.headers,
 			}
-
 			msg := httpReqToNATS(req)
-			replySubj := nats.NewInbox()
-			replySub, err := nc.SubscribeSync(replySubj)
-			require.NoError(t, err)
-			msg.Reply = replySubj
 
+			replySub, err := nc.SubscribeSync(msg.Reply)
+			require.NoError(t, err)
 			err = nc.PublishMsg(msg)
 			require.NoError(t, err)
 
@@ -126,10 +140,10 @@ func TestHttpReqToNATS_RequestReply_HeaderPropagation(t *testing.T) {
 // Apologise for the horrid code
 func TestHandleWebSocket_NATSRequestReply(t *testing.T) {
 	// Start embedded NATS server
-	ns := startEmbeddedNATSServer(t)
-	defer ns.Shutdown()
+	// ns := startEmbeddedNATSServer(t)
+	// defer ns.Shutdown()
 
-	nc, err := nats.Connect(ns.ClientURL())
+	nc, err := nats.Connect(nats.DefaultURL)
 	require.NoError(t, err)
 	defer nc.Close()
 
@@ -144,12 +158,14 @@ func TestHandleWebSocket_NATSRequestReply(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(proxy.handleWebSocket))
 	t.Cleanup(srv.Close)
 
-	// NATS subject key based on host+path
-	subject := "h8s.ws.localhost.test.foo"
-	t.Logf("Publishing on NATS subject: %s", subject)
+	// Create a test WebSocket URL and http.Request dummy to inform SubjectMapper
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/test/foo"
+
+	sm := subjectmapper.NewWebSocketMap(wsURL)
+	t.Logf("Publishing on NATS subject: %s", sm.PublishSubject())
 
 	// Subscribe on backend NATS side to reply, simulating a backend server
-	_, err = nc.Subscribe(subject, func(msg *nats.Msg) {
+	_, err = nc.Subscribe(sm.PublishSubject(), func(msg *nats.Msg) {
 		t.Logf("NATS subscriber got: %s", string(msg.Data))
 		t.Logf("Headers on NATS message: %v", msg.Header)
 		_ = nc.Publish(msg.Reply, []byte("pong"))
@@ -157,23 +173,20 @@ func TestHandleWebSocket_NATSRequestReply(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Dial WebSocket
-	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/test/foo"
+	// Dial WebSocket, creates the connection, and populates the wsconn pool
 	u, _ := url.Parse(wsURL)
-
 	ws, _, err := websocket.DefaultDialer.Dial(
 		u.String(),
 		http.Header{"Host": []string{"localhost"}})
 	require.NoError(t, err)
 	defer ws.Close()
 
-	// Send a message to trigger the handler
+	// Send message to trigger the handler
 	err = ws.WriteMessage(websocket.TextMessage, []byte("ping"))
 	require.NoError(t, err)
-
 	// Expect the response from NATS over WS
 	_, resp, err := ws.ReadMessage()
-	fmt.Println(string(resp))
+	fmt.Println("Response", string(resp))
 	require.NoError(t, err)
 	require.Equal(t, "pong", string(resp))
 }

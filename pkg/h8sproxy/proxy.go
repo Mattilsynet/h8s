@@ -3,15 +3,15 @@ package h8sproxy
 import (
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Mattilsynet/h8s/pkg/subjectmapper"
 	"github.com/gorilla/websocket"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nuid"
 )
 
 type WSConn struct {
@@ -63,7 +63,6 @@ type H8Sproxy struct {
 	RequestTimeout time.Duration
 	// HostFilters is a list of host filters to apply to incoming requests.
 	HostFilters []string
-	InboxPrefix string
 	WSPool      *WSPool
 }
 
@@ -78,7 +77,6 @@ func NewH8Sproxy(natsConn *nats.Conn, opts ...Option) *H8Sproxy {
 	proxy := &H8Sproxy{
 		NATSConn:       natsConn,
 		RequestTimeout: time.Second * 2,
-		InboxPrefix:    "_INBOX.h8s.",
 		WSPool:         NewWSPool(),
 	}
 	for _, opt := range opts {
@@ -99,12 +97,6 @@ func WithRequestTimeout(timeout time.Duration) Option {
 	}
 }
 
-func WithInboxPrefix(prefix string) Option {
-	return func(h8s *H8Sproxy) {
-		h8s.InboxPrefix = prefix
-	}
-}
-
 func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 	if strings.EqualFold(req.Header.Get("Connection"), "upgrade") &&
 		strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
@@ -120,7 +112,7 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 		http.Error(res, fmt.Sprintf("Error: %s", err), http.StatusGatewayTimeout)
 		return
 	}
-	slog.Info("Received reply", "reply-inbox", reply.Sub.Subject)
+	slog.Debug("Received reply", "reply-inbox", reply.Sub.Subject)
 }
 
 func (h8s *H8Sproxy) Dummy(res http.ResponseWriter, req *http.Request) {
@@ -134,7 +126,7 @@ func (h8s *H8Sproxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
-
+	fmt.Println("WebSocket upgrade successful", r.Proto)
 	secKey := r.Header.Get("Sec-WebSocket-Key")
 	if secKey == "" {
 		slog.Warn("Missing Sec-WebSocket-Key")
@@ -142,14 +134,13 @@ func (h8s *H8Sproxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cleanHost := cleanHost(r.Host)
-	publishSubject := "h8s.ws." + reverseHost(cleanHost) + "." + pathSegments(r.URL.Path)
-	subscribeSubject := nats.NewInbox()
-
+	sm := subjectmapper.NewSubjectMap(r)
+	subscribeSubject := sm.InboxSubjectPrefix()
+	fmt.Println("Subscribing to NATS subject:", subscribeSubject)
 	wsConn := &WSConn{
 		Conn:             conn,
 		Send:             make(chan []byte, 256),
-		PublishSubject:   publishSubject,
+		PublishSubject:   sm.WebSocketPublishSubject(),
 		SubscribeSubject: subscribeSubject,
 		Headers:          r.Header.Clone(),
 	}
@@ -203,6 +194,7 @@ func (h8s *H8Sproxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		fmt.Println("Publishing to NATS subject:", natsMsg)
 		err = h8s.NATSConn.PublishMsg(natsMsg)
 		if err != nil {
 			slog.Error("Failed to publish to NATS", "error", err)
@@ -212,68 +204,13 @@ func (h8s *H8Sproxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 func httpReqToNATS(req *http.Request) *nats.Msg {
-	cleanHost := cleanHost(req.Host)
-	subject := "h8s." + req.Method + "." + reverseHost(cleanHost) + "." + pathSegments(req.URL.Path)
-	msg := nats.NewMsg(subject)
+	sm := subjectmapper.NewSubjectMap(req)
+	msg := nats.NewMsg(sm.PublishSubject())
+	msg.Reply = fmt.Sprintf("%v.%v", sm.InboxSubjectPrefix(), nuid.Next())
 	for key, value := range req.Header {
 		for _, v := range value {
 			msg.Header.Add(key, v)
 		}
 	}
 	return msg
-}
-
-func reverseHost(host string) string {
-	parts := strings.Split(sanitizeHostForSubject(host), ".")
-	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
-		parts[i], parts[j] = parts[j], parts[i]
-	}
-	return strings.Join(parts, ".")
-}
-
-func pathToNATSSubject(path string) string {
-	decoded, err := url.PathUnescape(path)
-	if err != nil {
-		decoded = path // fallback to original if malformed
-	}
-	segments := strings.FieldsFunc(decoded, func(r rune) bool { return r == '/' })
-	safeSegments := make([]string, len(segments))
-	for i, s := range segments {
-		safeSegments[i] = sanitizeForNATS(s)
-	}
-	if len(safeSegments) == 0 {
-		return "root"
-	}
-	return strings.Join(safeSegments, ".")
-}
-
-func sanitizeForNATS(s string) string {
-	// Replace dots to avoid breaking NATS subjects
-	s = strings.ReplaceAll(s, ".", "_")
-	// Optionally replace other reserved characters here if needed
-	return s
-}
-
-func cleanHost(rawHost string) string {
-	host, _, err := net.SplitHostPort(rawHost)
-	if err != nil {
-		// If no port, assume rawHost is clean
-		host = rawHost
-	}
-	ip := net.ParseIP(host)
-	if ip != nil {
-		return ip.String() // e.g., 127.0.0.1
-	}
-	return host // e.g., "localhost"
-}
-
-func sanitizeHostForSubject(host string) string {
-	return strings.NewReplacer(
-		":", "_", // colons not allowed
-	).Replace(host)
-}
-
-func pathSegments(path string) string {
-	// We remove the first "/"
-	return strings.Join(strings.Split(pathToNATSSubject(path[1:]), "/"), ".")
 }
