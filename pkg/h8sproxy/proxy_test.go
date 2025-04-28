@@ -119,7 +119,7 @@ func TestHttpReqToNATS_RequestReply_HeaderPropagation(t *testing.T) {
 				URL:    reqURL,
 				Header: tt.headers,
 			}
-			msg := httpReqToNATS(req)
+			msg := httpRequestToNATSMessage(req)
 
 			replySub, err := nc.SubscribeSync(msg.Reply)
 			require.NoError(t, err)
@@ -140,11 +140,13 @@ func TestHttpReqToNATS_RequestReply_HeaderPropagation(t *testing.T) {
 // Apologise for the horrid code
 func TestHandleWebSocket_NATSRequestReply(t *testing.T) {
 	// Start embedded NATS server
-	// ns := startEmbeddedNATSServer(t)
-	// defer ns.Shutdown()
+	//	ns := startEmbeddedNATSServer(t)
+	//	defer ns.Shutdown()
 
-	nc, err := nats.Connect(nats.DefaultURL)
+	//	nc, err := nats.Connect(ns.ClientURL())
+	nc, err := nats.Connect("nats://localhost:4222")
 	require.NoError(t, err)
+	defer nc.Drain()
 	defer nc.Close()
 
 	// Create proxy
@@ -160,30 +162,34 @@ func TestHandleWebSocket_NATSRequestReply(t *testing.T) {
 
 	// Create a test WebSocket URL and http.Request dummy to inform SubjectMapper
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/test/foo"
-
 	sm := subjectmapper.NewWebSocketMap(wsURL)
-	t.Logf("Publishing on NATS subject: %s", sm.PublishSubject())
 
 	// Subscribe on backend NATS side to reply, simulating a backend server
-	_, err = nc.Subscribe(sm.PublishSubject(), func(msg *nats.Msg) {
-		t.Logf("NATS subscriber got: %s", string(msg.Data))
-		t.Logf("Headers on NATS message: %v", msg.Header)
-		_ = nc.Publish(msg.Reply, []byte("pong"))
-		t.Logf("Reply on NATS subject: %s", msg.Reply)
+	t.Log("Subscribing on NATS subject for replies:", sm.WebSocketPublishSubject())
+	_, subErr := nc.Subscribe(sm.WebSocketPublishSubject(), func(msg *nats.Msg) {
+		reply := &nats.Msg{
+			Subject: msg.Reply,
+			Data:    []byte("pong"),
+		}
+		err = nc.PublishMsg(reply)
+		if err != nil {
+			t.Logf("Error publishing reply: %v", err)
+		}
 	})
-	require.NoError(t, err)
+	require.NoError(t, subErr)
 
 	// Dial WebSocket, creates the connection, and populates the wsconn pool
 	u, _ := url.Parse(wsURL)
 	ws, _, err := websocket.DefaultDialer.Dial(
 		u.String(),
-		http.Header{"Host": []string{"localhost"}})
+		http.Header{"X-WS-Test": []string{"Websocket yay!"}})
 	require.NoError(t, err)
 	defer ws.Close()
 
 	// Send message to trigger the handler
 	err = ws.WriteMessage(websocket.TextMessage, []byte("ping"))
 	require.NoError(t, err)
+
 	// Expect the response from NATS over WS
 	_, resp, err := ws.ReadMessage()
 	fmt.Println("Response", string(resp))

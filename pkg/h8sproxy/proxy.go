@@ -104,8 +104,10 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 		fmt.Println("WebSocket upgrade")
 		return
 	}
+	// Scheme is not set in request, which is strange, we'll enforce that here.
+	req.URL.Scheme = "http"
+	msg := httpRequestToNATSMessage(req)
 
-	msg := httpReqToNATS(req)
 	reply, err := h8s.NATSConn.RequestMsg(msg, h8s.RequestTimeout)
 	if err != nil {
 		slog.Error("Failed to publish message", "error", err)
@@ -113,6 +115,14 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 		return
 	}
 	slog.Debug("Received reply", "reply-inbox", reply.Sub.Subject)
+
+	// write reply headers to responsewriter
+	for key, values := range reply.Header {
+		res.Header().Add(key, strings.Join(values, ","))
+	}
+	res.Header().Add("Content-Length", fmt.Sprintf("%d", len(reply.Data)))
+	// write reply.Data to responsewriter
+	res.Write(reply.Data)
 }
 
 func (h8s *H8Sproxy) Dummy(res http.ResponseWriter, req *http.Request) {
@@ -148,7 +158,7 @@ func (h8s *H8Sproxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	h8s.WSPool.Set(secKey, wsConn)
 	defer h8s.WSPool.Remove(secKey)
 
-	// Subscribe to per-client reply subject
+	// Subscribe to per-client reply subject, get data from the backend, and send to client.
 	sub, err := h8s.NATSConn.Subscribe(subscribeSubject, func(msg *nats.Msg) {
 		select {
 		case wsConn.Send <- msg.Data:
@@ -162,7 +172,7 @@ func (h8s *H8Sproxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer sub.Unsubscribe()
 
-	// Write data over WebSocket
+	// Write data over WebSocket, send reply(message payload) to client.
 	go func() {
 		for msg := range wsConn.Send {
 			err := wsConn.Conn.WriteMessage(websocket.TextMessage, msg)
@@ -173,7 +183,7 @@ func (h8s *H8Sproxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Read data from WebSocket
+	// Read data from WebSocket connection and publish to nats.
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
@@ -203,14 +213,20 @@ func (h8s *H8Sproxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func httpReqToNATS(req *http.Request) *nats.Msg {
+func httpRequestToNATSMessage(req *http.Request) *nats.Msg {
 	sm := subjectmapper.NewSubjectMap(req)
 	msg := nats.NewMsg(sm.PublishSubject())
 	msg.Reply = fmt.Sprintf("%v.%v", sm.InboxSubjectPrefix(), nuid.Next())
+	// Put all headers in the NATS message
 	for key, value := range req.Header {
 		for _, v := range value {
 			msg.Header.Add(key, v)
 		}
 	}
+
+	// Add propagation of nats subject as X-H8S-Subject header
+	// This can be used to inform downstream business logic that
+	// does not do any direct NATS communication.
+	msg.Header.Add("X-H8S-Subject", msg.Subject)
 	return msg
 }

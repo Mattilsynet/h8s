@@ -11,16 +11,11 @@ directly. They should not have any incoming requirements.
 
 <!-- end_slide -->
 
-## Diagram
+## Diagram 1 - wasmCloud
 
 ```mermaid +render
-graph TB
+graph TB 
     client
-
-    subgraph wasmCloud
-        h8s-provider
-        component
-    end
 
     subgraph edge-infrastructure 
         h8sd
@@ -33,16 +28,49 @@ graph TB
         end
     end
 
+    subgraph wasmCloud
+        h8s-provider
+        component
+    end
+
     client --> |http,ws| h8sd
     h8sd --> |pub| subject 
     h8sd --> |sub| inbox
     h8s-provider --> |subscribe| subject
     h8s-provider --> |publish| inbox
-    component --> |target_config| h8s-provider
-    h8s-provider --> |incoming-handler| component
+    h8s-provider --> |source_config| component 
+    h8s-provider <---> |incoming-handler| component
     component --> |outgoing-handler | h8s-provider 
 ```
 
+<!-- end_slide -->
+## Diagram 2 - Workloads connected to NATS
+
+```mermaid +render
+graph TB 
+    client
+
+    subgraph edge-infrastructure 
+        h8sd
+    end
+
+    subgraph NATS-Infrastructure
+        subgraph Account
+            subject
+            inbox
+        end
+    end
+
+    subgraph workloads-with-nats
+        workload
+    end
+
+    client --> |http,ws| h8sd
+    h8sd --> |pub| subject 
+    h8sd --> |sub| inbox
+    workload --> |subscribe| subject
+    workload --> |publish| inbox
+```
 <!-- end_slide -->
 
 ## Subject Mapping of REST and Websockets

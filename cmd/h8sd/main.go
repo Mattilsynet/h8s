@@ -48,7 +48,7 @@ func init() {
 	slog.SetDefault(logger)
 
 	NATSOptions = NATSConnectionOptions{
-		URL:             "nats://localhost:4222",
+		URL:             "nats://0.0.0.0:4222",
 		Name:            "h8sd",
 		Timeout:         5 * time.Second,
 		CredsPath:       "",
@@ -74,7 +74,7 @@ func main() {
 
 	mux.HandleFunc("/", h8sproxy.Handler)
 
-	slog.Info("Staring k8sd", "port", "8080")
+	slog.Info("Staring h8sd", "port", "8080")
 	if err := http.ListenAndServe("0.0.0.0:8080", mux); err != nil {
 		slog.Error("Failed to start server:", "error", err)
 	}
