@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -20,7 +21,11 @@ type NATSConnectionOptions struct {
 	InboxPrefix     string
 }
 
-var NATSOptions NATSConnectionOptions
+var (
+	NATSOptions   NATSConnectionOptions
+	natsURLFlag   = flag.String("nats-url", "", "NATS server URL")
+	natsCredsFlag = flag.String("nats-creds", "", "Path to NATS credentials file (optional)")
+)
 
 func NATSConnect(opts NATSConnectionOptions) (*nats.Conn, error) {
 	natsOpts := []nats.Option{
@@ -47,35 +52,46 @@ func init() {
 	logger := slog.New(handler)
 	slog.SetDefault(logger)
 
-	NATSOptions = NATSConnectionOptions{
-		URL:             "nats://0.0.0.0:4222",
-		Name:            "h8sd",
-		Timeout:         5 * time.Second,
-		CredsPath:       "",
-		ReconnectBuffer: 8388608,
+	flag.Parse()
+
+	// Determine NATS URL
+	url := *natsURLFlag
+	if url == "" {
+		url = os.Getenv("NATS_URL")
+	}
+	if url == "" {
+		url = "nats://0.0.0.0:4222"
 	}
 
-	if len(os.Getenv("NATS_URL")) > 0 {
-		NATSOptions.URL = os.Getenv("NATS_URL")
+	// Determine NATS Creds Path
+	creds := *natsCredsFlag
+	if creds == "" {
+		creds = os.Getenv("NATS_CREDS_PATH")
 	}
-	if len(os.Getenv("NATS_CREDS_PATH")) > 0 {
-		NATSOptions.CredsPath = os.Getenv("NATS_CREDS_PATH")
+
+	NATSOptions = NATSConnectionOptions{
+		URL:             url,
+		CredsPath:       creds,
+		Name:            "h8sd",
+		Timeout:         5 * time.Second,
+		ReconnectBuffer: 8 * 1024 * 1024, // 8MB
 	}
 }
 
 func main() {
 	mux := http.NewServeMux()
+
 	nc, err := NATSConnect(NATSOptions)
 	if err != nil {
 		slog.Error("Failed to connect to NATS", "error", err)
 		os.Exit(1)
 	}
-	h8sproxy := h8s.NewH8Sproxy(nc)
 
+	h8sproxy := h8s.NewH8Sproxy(nc)
 	mux.HandleFunc("/", h8sproxy.Handler)
 
-	slog.Info("Staring h8sd", "port", "8080")
+	slog.Info("Starting h8sd", "port", "8080")
 	if err := http.ListenAndServe("0.0.0.0:8080", mux); err != nil {
-		slog.Error("Failed to start server:", "error", err)
+		slog.Error("Failed to start server", "error", err)
 	}
 }
