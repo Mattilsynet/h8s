@@ -30,10 +30,26 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Extract metadata for tagging
+        id: meta
+        run: |
+          # Try to get exact tag
+          TAG=$(git describe --tags --exact-match 2>/dev/null || true)
+          if [ -n "$TAG" ]; then
+            echo "Found tag: $TAG"
+            echo "TAG=$TAG" >> $GITHUB_ENV
+          else
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            echo "Using short SHA: $SHORT_SHA"
+            echo "TAG=$SHORT_SHA" >> $GITHUB_ENV
+          fi
+
       - name: Build and push Docker image to GHCR
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
           push: true
-          tags: ghcr.io/mattilsynet/h8sd:latest
+          tags: |
+            ghcr.io/mattilsynet/h8sd:${{ env.TAG }}
+            ghcr.io/mattilsynet/h8sd:latest
