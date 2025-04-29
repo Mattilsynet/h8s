@@ -6,8 +6,8 @@ It's designed to work with a wasmCloud h8s-provider that integrates with NATS
 and implements a incoming-handler towards components. It also works for workloads that connect
 directly to NATS and act as responders on "by-convention" subjects.
 
-The motivation for creating this is to never directly expose our wasmcloud environments
-directly. They should not have any incoming requirements.
+The motivation for creating this is to never directly expose our wasmcloud environments or other workloads
+directly. They should not have any incoming infrastructure requirements.
 
 > *Just egress!*
 
