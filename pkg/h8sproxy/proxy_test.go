@@ -140,11 +140,11 @@ func TestHttpReqToNATS_RequestReply_HeaderPropagation(t *testing.T) {
 // Apologise for the horrid code
 func TestHandleWebSocket_NATSRequestReply(t *testing.T) {
 	// Start embedded NATS server
-	//	ns := startEmbeddedNATSServer(t)
-	//	defer ns.Shutdown()
+	ns := startEmbeddedNATSServer(t)
+	defer ns.Shutdown()
 
-	//	nc, err := nats.Connect(ns.ClientURL())
-	nc, err := nats.Connect("nats://localhost:4222")
+	nc, err := nats.Connect(ns.ClientURL())
+	//nc, err := nats.Connect("nats://localhost:4222")
 	require.NoError(t, err)
 	defer nc.Drain()
 	defer nc.Close()

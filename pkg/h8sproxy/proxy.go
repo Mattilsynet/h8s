@@ -155,6 +155,21 @@ func (h8s *H8Sproxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		Headers:          r.Header.Clone(),
 	}
 
+	// If the connection is not in the pool, do a handshake publish with 0 bytes.
+	if h8s.WSPool.Get(secKey) == nil {
+		handshakeMsg := &nats.Msg{
+			Subject: wsConn.PublishSubject,
+			Reply:   wsConn.SubscribeSubject,
+			Header:  nats.Header{},
+		}
+
+		err = h8s.NATSConn.PublishMsg(handshakeMsg)
+		if err != nil {
+			slog.Error("Failed to publish to NATS", "error", err)
+		}
+		slog.Info("published handshake message", "subject", wsConn.PublishSubject)
+	}
+
 	h8s.WSPool.Set(secKey, wsConn)
 	defer h8s.WSPool.Remove(secKey)
 
