@@ -158,7 +158,15 @@ func (sm *SubjectMap) PathSegments() string {
 }
 
 func (sm *SubjectMap) processHost(host string) {
-	//    Attempt to parse out a port if present
+	// Check for X-Forwarded-Host header
+	if forwardedHost := sm.Request.Header.Get("X-Forwarded-Host"); forwardedHost != "" {
+		host = forwardedHost
+	} else if realIP := sm.Request.Header.Get("X-Real-IP"); realIP != "" {
+		// Fallback to X-Real-IP if X-Forwarded-Host is not set
+		host = realIP
+	}
+
+	// Attempt to parse out a port if present
 	hostOnly, _, err := net.SplitHostPort(host)
 	if err != nil {
 		// net.SplitHostPort fails if there's no port or if the format is invalid.

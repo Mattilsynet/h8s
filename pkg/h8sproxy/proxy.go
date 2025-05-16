@@ -243,5 +243,6 @@ func httpRequestToNATSMessage(req *http.Request) *nats.Msg {
 	// This can be used to inform downstream business logic that
 	// does not do any direct NATS communication.
 	msg.Header.Add("X-H8S-Subject", msg.Subject)
+
 	return msg
 }
