@@ -38,6 +38,12 @@ func NewWSPool() *WSPool {
 	}
 }
 
+func (p *WSPool) ActiveConnections() int {
+	p.RLock()
+	defer p.RUnlock()
+	return len(p.conns)
+}
+
 func (p *WSPool) Set(secKey string, conn *WSConn) {
 	p.Lock()
 	defer p.Unlock()

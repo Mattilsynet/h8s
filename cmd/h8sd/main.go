@@ -90,6 +90,15 @@ func main() {
 	h8sproxy := h8s.NewH8Sproxy(nc)
 	mux.HandleFunc("/", h8sproxy.Handler)
 
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			slog.Info("number of websocket connections", "connections", h8sproxy.WSPool.ActiveConnections())
+		}
+	}()
+
 	slog.Info("Starting h8sd", "port", "8080")
 	if err := http.ListenAndServe("0.0.0.0:8080", mux); err != nil {
 		slog.Error("Failed to start server", "error", err)
