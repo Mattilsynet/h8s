@@ -56,10 +56,15 @@ func NewSubjectMap(req *http.Request, options ...SubjectMapOption) *SubjectMap {
 		opt(sm)
 	}
 
-	// Process Host to reverse it. Host names are reverse
-	// IP octet is kept.
-	// Port is dropped, not relevant in NATS.
-	sm.processHost(req.Host)
+	// Proxy detection
+	if forwardedHost := req.Header.Get("X-Forwarded-Host"); forwardedHost != "" {
+		sm.processHost(forwardedHost)
+	} else {
+		// Process Host to reverse it. Host names are reverse
+		// IP octet is kept.
+		// Port is dropped, not relevant in NATS.
+		sm.processHost(req.Host)
+	}
 
 	// Process Path and build part of a NATS subject.
 	sm.processPath(req.URL.Path)
@@ -158,14 +163,6 @@ func (sm *SubjectMap) PathSegments() string {
 }
 
 func (sm *SubjectMap) processHost(host string) {
-	// Check for X-Forwarded-Host header
-	if forwardedHost := sm.Request.Header.Get("X-Forwarded-Host"); forwardedHost != "" {
-		host = forwardedHost
-	} else if realIP := sm.Request.Header.Get("X-Real-IP"); realIP != "" {
-		// Fallback to X-Real-IP if X-Forwarded-Host is not set
-		host = realIP
-	}
-
 	// Attempt to parse out a port if present
 	hostOnly, _, err := net.SplitHostPort(host)
 	if err != nil {
