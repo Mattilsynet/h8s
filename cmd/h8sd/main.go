@@ -95,7 +95,9 @@ func main() {
 		defer ticker.Stop()
 
 		for range ticker.C {
-			slog.Info("number of websocket connections", "connections", h8sproxy.WSPool.ActiveConnections())
+			slog.Info(
+				"number of websocket connections",
+				"connections", h8sproxy.WSPool.ActiveConnections())
 		}
 	}()
 

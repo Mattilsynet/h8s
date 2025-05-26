@@ -111,7 +111,6 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 	if strings.EqualFold(req.Header.Get("Connection"), "upgrade") &&
 		strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
 		h8s.handleWebSocket(res, req)
-		fmt.Println("WebSocket upgrade")
 		return
 	}
 	// Scheme is not set in request, which is strange, we'll enforce that here.
@@ -147,7 +146,6 @@ func (h8s *H8Sproxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	fmt.Println("WebSocket upgrade successful", r.Proto)
 	secKey := r.Header.Get("Sec-WebSocket-Key")
 	if secKey == "" {
 		slog.Warn("Missing Sec-WebSocket-Key")
@@ -194,6 +192,7 @@ func (h8s *H8Sproxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			err := wsConn.Conn.WriteMessage(websocket.TextMessage, msg)
 			if err != nil {
 				slog.Warn("WebSocket write failed", "error", err)
+				h8s.cmConnectionClosed(wsConn.Headers.Get("Sec-WebSocket-Key"))
 				return
 			}
 		}
@@ -204,6 +203,7 @@ func (h8s *H8Sproxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			slog.Info("WebSocket read closed", "error", err)
+			h8s.cmConnectionClosed(wsConn.Headers.Get("Sec-WebSocket-Key"))
 			break
 		}
 		natsMsg := &nats.Msg{
@@ -220,7 +220,6 @@ func (h8s *H8Sproxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		fmt.Println("Publishing to NATS subject:", natsMsg)
 		err = h8s.NATSConn.PublishMsg(natsMsg)
 		if err != nil {
 			slog.Error("Failed to publish to NATS", "error", err)
@@ -264,11 +263,30 @@ func (h8s *H8Sproxy) cmConnectionEstablished(wsConn *WSConn) {
 		"subject", wsConn.PublishSubject)
 }
 
+// cmConnectionClosed publishes a message on the control channel indicating that
+// a websocket connection has been closed or cannot be written to.
 func (h8s *H8Sproxy) cmConnectionClosed(secKey string) {
 	wsConn := h8s.WSPool.Get(secKey)
 	if wsConn == nil {
 		return
 	}
+
+	controlMsg := &nats.Msg{
+		Subject: H8SControlSubjectPrefix + "ws.conn.closed",
+		Reply:   wsConn.SubscribeSubject,
+		Header:  nats.Header(wsConn.Headers),
+	}
+
+	err := h8s.NATSConn.PublishMsg(controlMsg)
+	if err != nil {
+		slog.Error(
+			"unable to pulish control message",
+			"message", controlMsg)
+	}
+	slog.Info(
+		"connection closed, published control message",
+		"message", controlMsg,
+	)
 }
 
 func httpRequestToNATSMessage(req *http.Request) *nats.Msg {
@@ -285,7 +303,7 @@ func httpRequestToNATSMessage(req *http.Request) *nats.Msg {
 	// Add propagation of nats subject as X-H8S-Subject header
 	// This can be used to inform downstream business logic that
 	// does not do any direct NATS communication.
-	msg.Header.Add("X-H8S-Subject", msg.Subject)
+	msg.Header.Add("X-H8S-PublishSubject", msg.Subject)
 
 	return msg
 }
