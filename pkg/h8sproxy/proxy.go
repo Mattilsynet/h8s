@@ -231,13 +231,6 @@ func (h8s *H8Sproxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 // cmConnectionEstablished publishes a message on the control channel indicating that
 // a websocket connection has been established.
 func (h8s *H8Sproxy) cmConnectionEstablished(wsConn *WSConn) {
-	// If the connection is not in the pool, do a handshake publish with 0 bytes.
-	handshakeMsg := &nats.Msg{
-		Subject: wsConn.PublishSubject,
-		Reply:   wsConn.SubscribeSubject,
-		Header:  nats.Header(wsConn.Headers),
-	}
-
 	// Soft include of controlMessage on establish of websocket connection.
 	controlMessage := &nats.Msg{
 		Subject: H8SControlSubjectPrefix + ".ws.conn.established",
@@ -245,12 +238,6 @@ func (h8s *H8Sproxy) cmConnectionEstablished(wsConn *WSConn) {
 		Header:  nats.Header(wsConn.Headers),
 	}
 	controlMessage.Header.Add("X-H8S-PublishSubject", wsConn.PublishSubject)
-
-	err := h8s.NATSConn.PublishMsg(handshakeMsg)
-	if err != nil {
-		slog.Error("failed to publish to NATS", "error", err)
-	}
-	slog.Info("published handshake message", "subject", controlMessage.Subject)
 
 	controlErr := h8s.NATSConn.PublishMsg(controlMessage)
 	if controlErr != nil {
@@ -272,7 +259,7 @@ func (h8s *H8Sproxy) cmConnectionClosed(secKey string) {
 	}
 
 	controlMsg := &nats.Msg{
-		Subject: H8SControlSubjectPrefix + "ws.conn.closed",
+		Subject: H8SControlSubjectPrefix + ".ws.conn.closed",
 		Reply:   wsConn.SubscribeSubject,
 		Header:  nats.Header(wsConn.Headers),
 	}

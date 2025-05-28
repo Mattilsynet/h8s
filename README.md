@@ -20,7 +20,7 @@ graph TB
     client
 
     subgraph edge-infrastructure 
-        h8sd
+        h8s
     end
 
     subgraph NATS-Infrastructure
@@ -35,14 +35,13 @@ graph TB
         component
     end
 
-    client --> |http,ws| h8sd
-    h8sd --> |pub| subject 
-    h8sd --> |sub| inbox
+    client --> |http| h8s
+    h8s --> |pub| subject 
+    h8s --> |sub| inbox
     h8s-provider --> |subscribe| subject
     h8s-provider --> |publish| inbox
-    h8s-provider --> |source_config| component 
-    h8s-provider <---> |incoming-handler| component
-    component --> |outgoing-handler | h8s-provider 
+    h8s-provider --> |link: source_config| component 
+    h8s-provider <---> |interface: request-reply| component
 ```
 
 <!-- end_slide -->
@@ -53,7 +52,7 @@ graph TB
     client
 
     subgraph edge-infrastructure 
-        h8sd
+        h8s
     end
 
     subgraph NATS-Infrastructure
@@ -67,9 +66,9 @@ graph TB
         workload
     end
 
-    client --> |http,ws| h8sd
-    h8sd --> |pub| subject 
-    h8sd --> |sub| inbox
+    client --> |http,ws| h8s
+    h8s --> |pub| subject 
+    h8s --> |sub| inbox
     workload --> |subscribe| subject
     workload --> |publish| inbox
 ```
@@ -77,4 +76,41 @@ graph TB
 
 ## Subject Mapping of REST and Websockets
 
-..wip..
+```mermaid +render
+graph TB 
+    client
+
+    subgraph edge-infrastructure 
+        h8s
+    end
+
+    subgraph NATS-Infrastructure
+        subgraph Account
+            subject
+            inbox
+            control.ws.conn.established
+            control.ws.conn.closed
+        end
+    end
+
+    subgraph wasmCloud
+        h8s-provider
+        component
+        sender-component
+    end
+
+    client --> |ws| h8s
+    h8s --> |pub| subject 
+    h8s --> |sub| inbox
+    h8s --> |pub| control.ws.conn.established
+    h8s --> |pub| control.ws.conn.closed
+    h8s-provider --> |sub| control.ws.conn.established
+    h8s-provider --> |sub| control.ws.conn.closed
+    h8s-provider --> |sub| subject
+    h8s-provider --> |pub| inbox
+    h8s-provider --> |link: source_config| component 
+    h8s-provider --> |interface: receiver| component
+    sender-component --> |interface: sender| h8s-provider 
+```
+
+> The sender WIT interface provides a couple of functions: `'get-connections()' and 'get-connections-by-subject(subject)'.`
