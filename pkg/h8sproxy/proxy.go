@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -68,12 +69,21 @@ func (p *WSPool) Remove(secKey string) {
 
 type Option func(*H8Sproxy)
 
+type H8SInterestTracker interface {
+	Run() error
+}
+
 type H8Sproxy struct {
 	NATSConn       *nats.Conn
 	RequestTimeout time.Duration
-	// HostFilters is a list of host filters to apply to incoming requests.
+	// HostFilters is a list of allowed hostnames.
 	HostFilters []string
-	WSPool      *WSPool
+	// InterestOnly flag indicates if H8Sproxy should only serve
+	// traffic for registered interest. Downstream clients communicate
+	// interest over NATS on the h8s.control.interest subject.
+	InterestOnly    bool
+	InterestTracker H8SInterestTracker
+	WSPool          *WSPool
 }
 
 var upgrader = websocket.Upgrader{
@@ -88,11 +98,31 @@ func NewH8Sproxy(natsConn *nats.Conn, opts ...Option) *H8Sproxy {
 		NATSConn:       natsConn,
 		RequestTimeout: time.Second * 2,
 		WSPool:         NewWSPool(),
+		InterestOnly:   false,
 	}
 	for _, opt := range opts {
 		opt(proxy)
 	}
+	if proxy.InterestOnly {
+		slog.Info("Starting with interest mode only")
+		if err := proxy.InterestTracker.Run(); err != nil {
+			slog.Error("failed to start InterestTracker", "error", err)
+			os.Exit(1)
+		}
+	}
 	return proxy
+}
+
+func WithInterestOnly() Option {
+	return func(h8s *H8Sproxy) {
+		h8s.InterestOnly = true
+	}
+}
+
+func WithInterestTracker(tracker H8SInterestTracker) Option {
+	return func(h8s *H8Sproxy) {
+		h8s.InterestTracker = tracker
+	}
 }
 
 func WithHostFilter(filter string) Option {
@@ -108,6 +138,9 @@ func WithRequestTimeout(timeout time.Duration) Option {
 }
 
 func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
+	// TODO:, check HostFilters
+	// TODO, check InterestOnly
+
 	if strings.EqualFold(req.Header.Get("Connection"), "upgrade") &&
 		strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
 		h8s.handleWebSocket(res, req)
