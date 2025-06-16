@@ -13,6 +13,8 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nuid"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -71,6 +73,7 @@ type Option func(*H8Sproxy)
 
 type H8SInterestTracker interface {
 	Run() error
+	ValidRequest(req http.Request) bool
 }
 
 type H8Sproxy struct {
@@ -84,6 +87,8 @@ type H8Sproxy struct {
 	InterestOnly    bool
 	InterestTracker H8SInterestTracker
 	WSPool          *WSPool
+	Tracer          trace.Tracer // OpenTelemetry tracer for this connection
+	Meter           metric.Meter // OpenTelemetry meter for this connection
 }
 
 var upgrader = websocket.Upgrader{
@@ -137,9 +142,27 @@ func WithRequestTimeout(timeout time.Duration) Option {
 	}
 }
 
+func WithOTELTracer(tracer trace.Tracer) Option {
+	return func(h8s *H8Sproxy) {
+		h8s.Tracer = tracer
+	}
+}
+
+func WithOTELMeter(meter metric.Meter) Option {
+	return func(h8s *H8Sproxy) {
+		h8s.Meter = meter
+	}
+}
+
 func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 	// TODO:, check HostFilters
-	// TODO, check InterestOnly
+	if h8s.InterestOnly {
+		if !h8s.InterestTracker.ValidRequest(*req) {
+			res.Header().Set("Content-Type", "text/plain")
+			res.WriteHeader(http.StatusNotFound)
+			return
+		}
+	}
 
 	if strings.EqualFold(req.Header.Get("Connection"), "upgrade") &&
 		strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {

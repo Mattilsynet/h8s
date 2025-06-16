@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 	"time"
 
@@ -59,6 +60,18 @@ func (it *InterestTracker) Run() error {
 		return err
 	}
 	return nil
+}
+
+func (it *InterestTracker) ValidRequest(req http.Request) bool {
+	it.Interests.RLock()
+	defer it.Interests.RUnlock()
+
+	tempInterest := &Interest{
+		req.Host,
+		req.URL.Path,
+	}
+	_, exists := it.Interests.InterestMap[tempInterest.Id()]
+	return exists
 }
 
 func (it *Interests) Add(interest *Interest) {

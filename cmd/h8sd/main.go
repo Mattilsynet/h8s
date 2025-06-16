@@ -10,7 +10,11 @@ import (
 
 	h8s "github.com/Mattilsynet/h8s/pkg/h8sproxy"
 	"github.com/Mattilsynet/h8s/pkg/tracker"
+	"github.com/Mattilsynet/othell/pkg/othell"
 	"github.com/nats-io/nats.go"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/sdk/resource"
+	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
 )
 
 type NATSConnectionOptions struct {
@@ -23,9 +27,12 @@ type NATSConnectionOptions struct {
 }
 
 var (
-	NATSOptions   NATSConnectionOptions
-	natsURLFlag   = flag.String("nats-url", "", "NATS server URL")
-	natsCredsFlag = flag.String("nats-creds", "", "Path to NATS credentials file (optional)")
+	NATSOptions     NATSConnectionOptions
+	natsURLFlag     = flag.String("nats-url", "", "NATS server URL")
+	natsCredsFlag   = flag.String("nats-creds", "", "Path to NATS credentials file (optional)")
+	otelEnabledFlag = flag.Bool("otel-enabled", false, "Enable OpenTelemetry tracing and metrics")
+	otelEndpoint    = flag.String("otel-endpoint", "", "")
+	otel            = &othell.Othell{}
 )
 
 func NATSConnect(opts NATSConnectionOptions) (*nats.Conn, error) {
@@ -79,7 +86,38 @@ func init() {
 	}
 }
 
+func enableOTEL() {
+	if !*otelEnabledFlag {
+		slog.Info("OpenTelemetry tracing and metrics are disabled")
+		return
+	}
+	slog.Info("Enabling OpenTelemetry tracing and metrics")
+
+	commonAttrs := []attribute.KeyValue{
+		semconv.ServiceNameKey.String("h8sd"),
+		attribute.String("somekey", "somevalue"),
+	}
+	sres := resource.NewWithAttributes(
+		semconv.SchemaURL,
+		commonAttrs...,
+	)
+
+	var err error
+	otel, err = othell.New(
+		"h8sd",
+		othell.WithCollectorEndpoint(*otelEndpoint),
+		othell.WithResource(sres))
+	if err != nil {
+		slog.Error("Unable to initialize Othell", "error", err)
+		os.Exit(1)
+	}
+
+	slog.Info("OpenTelemetry (Othell) initialized successfully")
+}
+
 func main() {
+	enableOTEL()
+
 	mux := http.NewServeMux()
 
 	nc, err := NATSConnect(NATSOptions)
@@ -93,7 +131,10 @@ func main() {
 	h8sproxy := h8s.NewH8Sproxy(
 		nc,
 		h8s.WithInterestOnly(),
-		h8s.WithInterestTracker(h8stracker))
+		h8s.WithInterestTracker(h8stracker),
+		h8s.WithOTELMeter(otel.Meter),
+		h8s.WithOTELTracer(otel.Tracer))
+
 	mux.HandleFunc("/", h8sproxy.Handler)
 
 	go func() {
