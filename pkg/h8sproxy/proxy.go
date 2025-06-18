@@ -19,7 +19,8 @@ import (
 )
 
 const (
-	H8SControlSubjectPrefix = "h8s.control"
+	H8SControlSubjectPrefix   = "h8s.control"
+	H8SInterestControlSubject = H8SControlSubjectPrefix + ".interest"
 )
 
 type WSConn struct {

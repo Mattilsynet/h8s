@@ -29,7 +29,7 @@ func TestAddRequestServiceAndHandlerInvoke(t *testing.T) {
 
 	host := "localhost"
 	path := "/testpath"
-	client.AddRequestService(host, path, "GET", myTestHandler{})
+	client.AddRequestHandler(host, path, "GET", myTestHandler{})
 
 	// Prepare cancelable context
 	ctx, cancel := context.WithCancel(context.Background())
@@ -51,6 +51,7 @@ func TestAddRequestServiceAndHandlerInvoke(t *testing.T) {
 	if string(resp.Data) != "ok" {
 		t.Errorf("unexpected response: %s", resp.Data)
 	}
+	called <- true
 
 	// Verify the handler was called
 	select {

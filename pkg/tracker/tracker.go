@@ -73,7 +73,7 @@ func (it *InterestTracker) ValidRequest(req http.Request) bool {
 		req.Method,
 	}
 	if interest, exists := it.Interests.InterestMap[tempInterest.Id()]; exists && interest != nil {
-		slog.Error("untable to find interest for request", "interest", interest, "found", exists)
+		slog.Error("untable to find interest for request", "interest", interest, "exists", exists)
 		return false
 	}
 	return true
@@ -95,7 +95,7 @@ func (it *Interests) RunEvictions() {
 		for id, ts := range it.InterestSeen {
 			now := time.Now()
 			dur := now.Sub(ts)
-			if dur > 2*time.Minute {
+			if dur > 1*time.Minute {
 				it.evict(id)
 			}
 		}

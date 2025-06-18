@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/Mattilsynet/h8s/pkg/h8sproxy"
 	"github.com/Mattilsynet/h8s/pkg/h8sservice"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/micro"
@@ -22,8 +23,8 @@ func main() {
 
 	svc := h8sservice.NewService(
 		nc,
-		h8sservice.WithInterestPublishSubject("h8s.control.interest"))
-	svc.AddRequestService("localhost", "/echo", "POST", myHandler{})
+		h8sservice.WithInterestPublishSubject(h8sproxy.H8SInterestControlSubject))
+	svc.AddRequestHandler("localhost", "/echo", "POST", myHandler{})
 
 	go svc.Run()
 
@@ -31,6 +32,7 @@ func main() {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
 
+	svc.Shutdown()
 	log.Println("shutting down")
 	log.Println("bye")
 }

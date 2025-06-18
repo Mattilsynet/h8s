@@ -9,7 +9,7 @@ import (
 	"time"
 
 	h8s "github.com/Mattilsynet/h8s/pkg/h8sproxy"
-	"github.com/Mattilsynet/h8s/pkg/tracker"
+	_ "github.com/Mattilsynet/h8s/pkg/tracker"
 	"github.com/Mattilsynet/othell/pkg/othell"
 	"github.com/nats-io/nats.go"
 	"go.opentelemetry.io/otel/attribute"
@@ -126,12 +126,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	h8stracker := tracker.NewInterestTracker(nc, h8s.H8SControlSubjectPrefix+".interest")
+	//	h8stracker := tracker.NewInterestTracker(nc, h8s.H8SControlSubjectPrefix+".interest")
 
 	h8sproxy := h8s.NewH8Sproxy(
 		nc,
-		h8s.WithInterestOnly(),
-		h8s.WithInterestTracker(h8stracker),
+		//		h8s.WithInterestOnly(),
+		//		h8s.WithInterestTracker(h8stracker),
 		h8s.WithOTELMeter(otel.Meter),
 		h8s.WithOTELTracer(otel.Tracer))
 

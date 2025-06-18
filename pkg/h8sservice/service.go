@@ -109,7 +109,7 @@ func (c *Service) Run() {
 	}()
 }
 
-func (c *Service) AddRequestService(host string, path string, method string, svc ServiceRequestHandler) {
+func (c *Service) AddRequestHandler(host string, path string, method string, svc ServiceRequestHandler) {
 	metadata := make(map[string]string)
 	metadata["host"] = host
 	metadata["path"] = path
@@ -125,4 +125,11 @@ func (c *Service) AddRequestService(host string, path string, method string, svc
 			QueueGroup: fmt.Sprintf("h8ss-%v-%v-%v", method, host, path),
 		},
 	}
+}
+
+func (c *Service) Shutdown() {
+	slog.Info("shutting down service")
+	c.ctx.Done()
+	c.wg.Wait()
+	slog.Info("service shutdown complete")
 }
