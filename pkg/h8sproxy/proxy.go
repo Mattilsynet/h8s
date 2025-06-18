@@ -202,9 +202,6 @@ func (h8s *H8Sproxy) Dummy(res http.ResponseWriter, req *http.Request) {
 }
 
 func (h8s *H8Sproxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	_, span := h8s.Tracer.Start(r.Context(), "websocket_connection")
-	defer span.End()
-
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Error("WebSocket upgrade failed", "error", err)
