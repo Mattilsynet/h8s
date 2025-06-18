@@ -94,7 +94,7 @@ func enableOTEL() {
 	slog.Info("Enabling OpenTelemetry tracing and metrics")
 
 	commonAttrs := []attribute.KeyValue{
-		semconv.ServiceNameKey.String("h8sd"),
+		semconv.ServiceNameKey.String(""),
 		attribute.String("somekey", "somevalue"),
 	}
 	sres := resource.NewWithAttributes(

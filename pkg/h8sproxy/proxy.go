@@ -2,6 +2,7 @@ package h8sproxy
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -169,6 +170,11 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 		h8s.handleWebSocket(res, req)
 		return
 	}
+	if h8s.Tracer != nil {
+		_, span := h8s.Tracer.Start(req.Context(), "request")
+		defer span.End()
+	}
+
 	// Scheme is not set in request, which is strange, we'll enforce that here.
 	req.URL.Scheme = "http"
 	msg := httpRequestToNATSMessage(req)
@@ -195,6 +201,9 @@ func (h8s *H8Sproxy) Dummy(res http.ResponseWriter, req *http.Request) {
 }
 
 func (h8s *H8Sproxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	_, span := h8s.Tracer.Start(r.Context(), "websocket_connection")
+	defer span.End()
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Error("WebSocket upgrade failed", "error", err)
@@ -342,6 +351,12 @@ func httpRequestToNATSMessage(req *http.Request) *nats.Msg {
 			msg.Header.Add(key, v)
 		}
 	}
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		slog.Error("failed to read request body", "error", err)
+	}
+	defer req.Body.Close()
+	msg.Data = body
 
 	// Add propagation of nats subject as X-H8S-Subject header
 	// This can be used to inform downstream business logic that

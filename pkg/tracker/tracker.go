@@ -25,12 +25,13 @@ type Interests struct {
 }
 
 type Interest struct {
-	Host string `json:"host"`
-	Path string `json:"path"`
+	Host   string `json:"host"`
+	Path   string `json:"path"`
+	Method string `json:"method"`
 }
 
 func (i *Interest) Id() string {
-	return fmt.Sprintf("%s:%s", i.Host, i.Path)
+	return fmt.Sprintf("%s:%s:%s", i.Host, i.Path, i.Method)
 }
 
 func NewInterestTracker(nc *nats.Conn, interestSubject string) *InterestTracker {
@@ -69,9 +70,13 @@ func (it *InterestTracker) ValidRequest(req http.Request) bool {
 	tempInterest := &Interest{
 		req.Host,
 		req.URL.Path,
+		req.Method,
 	}
-	_, exists := it.Interests.InterestMap[tempInterest.Id()]
-	return exists
+	if interest, exists := it.Interests.InterestMap[tempInterest.Id()]; exists && interest != nil {
+		slog.Error("untable to find interest for request", "interest", interest, "found", exists)
+		return false
+	}
+	return true
 }
 
 func (it *Interests) Add(interest *Interest) {
@@ -84,7 +89,7 @@ func (it *Interests) Add(interest *Interest) {
 
 func (it *Interests) RunEvictions() {
 	for {
-		slog.Info("Current intrests", "interests", it.InterestMap)
+		slog.Info("Current interests", "interests", it.InterestMap)
 		time.Sleep(5 * time.Second) // Initial delay before starting evictions
 
 		for id, ts := range it.InterestSeen {

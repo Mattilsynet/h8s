@@ -1,6 +1,7 @@
 package subjectmapper
 
 import (
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -72,6 +73,51 @@ func NewSubjectMap(req *http.Request, options ...SubjectMapOption) *SubjectMap {
 	return sm
 }
 
+func NewSubjectMapFromParts(host string, path string, method string, options ...SubjectMapOption) *SubjectMap {
+	sm := &SubjectMap{
+		Request:       nil,
+		SubjectPrefix: SubjectPrefix,
+		InboxPrefix:   InboxPrefix,
+	}
+
+	for _, opt := range options {
+		opt(sm)
+	}
+
+	sreq, err := processRequestURL(fmt.Sprintf("http://%v/%v", host, path))
+	sreq.Method = method
+	if err != nil {
+		slog.Error("failed to process request URL", "error", err)
+	}
+
+	sm.Request = sreq
+	sm.processHost(sreq.Host)
+	sm.processPath(sreq.URL.Path)
+	return sm
+}
+
+func NewSubjectMapFromURL(urlStr string, options ...SubjectMapOption) *SubjectMap {
+	sm := &SubjectMap{
+		Request:       nil,
+		SubjectPrefix: SubjectPrefix,
+		InboxPrefix:   InboxPrefix,
+	}
+
+	for _, opt := range options {
+		opt(sm)
+	}
+
+	sreq, err := processRequestURL("http://" + urlStr)
+	if err != nil {
+		slog.Error("failed to process request URL", "error", err)
+	}
+
+	sm.Request = sreq
+	sm.processHost(sreq.Host)
+	sm.processPath(sreq.URL.Path)
+	return sm
+}
+
 func NewWebSocketMap(url string, options ...SubjectMapOption) *SubjectMap {
 	sm := &SubjectMap{
 		Request:       nil,
@@ -104,6 +150,20 @@ func (sm *SubjectMap) processWebSocketURL(urlStr string) (*http.Request, error) 
 	req := &http.Request{
 		URL:    url,
 		Method: "ws",
+		Host:   url.Host,
+	}
+
+	return req, nil
+}
+
+func processRequestURL(urlStr string) (*http.Request, error) {
+	url, err := url.Parse(urlStr)
+	if err != nil {
+		return nil, err
+	}
+	req := &http.Request{
+		URL:    url,
+		Method: "GET",
 		Host:   url.Host,
 	}
 
