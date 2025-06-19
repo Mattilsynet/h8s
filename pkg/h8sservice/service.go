@@ -1,3 +1,4 @@
+// Package h8sservice package provides a NATS-based client for handling h8s proxy communication
 package h8sservice
 
 import (
@@ -46,7 +47,7 @@ func WithInterestPublishSubject(subject string) Option {
 	}
 }
 
-// NewClient creates a new h8s server
+// NewService creates a new h8s server
 func NewService(nc *nats.Conn, opts ...Option) *Service {
 	client := &Service{
 		ctx:               context.Background(),
@@ -116,9 +117,10 @@ func (c *Service) AddRequestHandler(host string, path string, method string, svc
 	metadata["method"] = method
 
 	c.requestServices[host+path] = micro.Config{
-		Name:     "test",
-		Metadata: metadata,
-		Version:  "0.0.1",
+		Name:        "test",
+		Metadata:    metadata,
+		Version:     "0.0.1",
+		Description: fmt.Sprintf("%s https://%s%s", method, host, path),
 		Endpoint: &micro.EndpointConfig{
 			Subject:    subjectmapper.NewSubjectMapFromParts(host, path, method).PublishSubject(),
 			Handler:    micro.HandlerFunc(svc.Handle),

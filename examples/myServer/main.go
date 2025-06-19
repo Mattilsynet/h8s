@@ -25,7 +25,7 @@ func main() {
 		nc,
 		h8sservice.WithInterestPublishSubject(h8sproxy.H8SInterestControlSubject))
 	svc.AddRequestHandler("localhost", "/echo", "POST", myHandler{})
-
+	svc.AddRequestHandler("localhost", "/html", "GET", myHTMLHandler{})
 	go svc.Run()
 
 	sig := make(chan os.Signal, 1)
@@ -41,4 +41,10 @@ type myHandler struct{}
 
 func (myHandler) Handle(r micro.Request) {
 	r.Respond(r.Data())
+}
+
+type myHTMLHandler struct{}
+
+func (myHTMLHandler) Handle(r micro.Request) {
+	r.Respond([]byte("<html><body><h1>Hello, World!</h1></body></html>"))
 }
