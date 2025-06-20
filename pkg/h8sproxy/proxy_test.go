@@ -118,6 +118,7 @@ func TestHttpReqToNATS_RequestReply_HeaderPropagation(t *testing.T) {
 				Host:   tt.host,
 				URL:    reqURL,
 				Header: tt.headers,
+				Body:   http.NoBody,
 			}
 			msg := httpRequestToNATSMessage(req)
 
@@ -136,7 +137,7 @@ func TestHttpReqToNATS_RequestReply_HeaderPropagation(t *testing.T) {
 	}
 }
 
-// TestHandleWebSocket_NATSRequestReply tests the WebSocket handler with NATS request-reply
+// TestHandleWebSocket_NATSRequestReply tests the WebSocket handler with NATS "request-reply"
 // Apologise for the horrid code
 func TestHandleWebSocket_NATSRequestReply(t *testing.T) {
 	// Start embedded NATS server
@@ -144,7 +145,7 @@ func TestHandleWebSocket_NATSRequestReply(t *testing.T) {
 	defer ns.Shutdown()
 
 	nc, err := nats.Connect(ns.ClientURL())
-	//nc, err := nats.Connect("nats://localhost:4222")
+	// nc, err := nats.Connect("nats://localhost:4222")
 	require.NoError(t, err)
 	defer nc.Drain()
 	defer nc.Close()
@@ -154,6 +155,8 @@ func TestHandleWebSocket_NATSRequestReply(t *testing.T) {
 		NATSConn:       nc,
 		RequestTimeout: 5 * time.Second,
 		WSPool:         NewWSPool(),
+		OTELEnabled:    false,
+		InterestOnly:   false,
 	}
 
 	// Setup test server
@@ -189,6 +192,8 @@ func TestHandleWebSocket_NATSRequestReply(t *testing.T) {
 	// Send message to trigger the handler
 	err = ws.WriteMessage(websocket.TextMessage, []byte("ping"))
 	require.NoError(t, err)
+
+	time.Sleep(100 * time.Millisecond) // Give time for the message to be processed
 
 	// Expect the response from NATS over WS
 	_, resp, err := ws.ReadMessage()

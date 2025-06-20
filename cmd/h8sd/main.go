@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -9,9 +10,10 @@ import (
 	"time"
 
 	h8s "github.com/Mattilsynet/h8s/pkg/h8sproxy"
-	_ "github.com/Mattilsynet/h8s/pkg/tracker"
+	"github.com/Mattilsynet/h8s/pkg/tracker"
 	"github.com/Mattilsynet/othell/pkg/othell"
 	"github.com/nats-io/nats.go"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
@@ -30,6 +32,7 @@ var (
 	NATSOptions     NATSConnectionOptions
 	natsURLFlag     = flag.String("nats-url", "", "NATS server URL")
 	natsCredsFlag   = flag.String("nats-creds", "", "Path to NATS credentials file (optional)")
+	trackInterest   = flag.Bool("track-interest", false, "Enbles Interest Tracker for self configuration. Will no longer accept arbitrary request when enabled.")
 	otelEnabledFlag = flag.Bool("otel-enabled", false, "Enable OpenTelemetry tracing and metrics")
 	otelEndpoint    = flag.String("otel-endpoint", "", "")
 	otel            = &othell.Othell{}
@@ -117,8 +120,10 @@ func enableOTEL() {
 
 func main() {
 	enableOTEL()
-
-	mux := http.NewServeMux()
+	if *otelEnabledFlag {
+		defer func() { _ = otel.MeterProvider.Shutdown(context.Background()) }()
+		defer func() { _ = otel.TraceProvider.Shutdown(context.Background()) }()
+	}
 
 	nc, err := NATSConnect(NATSOptions)
 	if err != nil {
@@ -126,30 +131,37 @@ func main() {
 		os.Exit(1)
 	}
 
-	//	h8stracker := tracker.NewInterestTracker(nc, h8s.H8SControlSubjectPrefix+".interest")
+	// Construct slice of Options for h8sproxy factory based on command line flags.
+	var executionOptions []h8s.Option
+
+	if *trackInterest {
+		h8stracker := tracker.NewInterestTracker(nc, h8s.H8SControlSubjectPrefix+".interest")
+		executionOptions = append(executionOptions, h8s.WithInterestOnly())
+		executionOptions = append(executionOptions, h8s.WithInterestTracker(h8stracker))
+	}
+
+	if *otelEnabledFlag {
+		executionOptions = append(executionOptions, h8s.WithOTELMeter(otel.Meter))
+		executionOptions = append(executionOptions, h8s.WithOTELTracer(otel.Tracer))
+	}
 
 	h8sproxy := h8s.NewH8Sproxy(
 		nc,
-		//		h8s.WithInterestOnly(),
-		//		h8s.WithInterestTracker(h8stracker),
-		h8s.WithOTELMeter(otel.Meter),
-		h8s.WithOTELTracer(otel.Tracer))
+		executionOptions...)
 
+	mux := http.NewServeMux()
 	mux.HandleFunc("/", h8sproxy.Handler)
 
-	go func() {
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
-
-		for range ticker.C {
-			slog.Info(
-				"number of websocket connections",
-				"connections", h8sproxy.WSPool.ActiveConnections())
-		}
-	}()
-
+	var muxhandler http.Handler
+	if *otelEnabledFlag {
+		muxhandler = otelhttp.NewHandler(mux, "h8s")
+	} else {
+		muxhandler = mux
+	}
 	slog.Info("Starting h8sd", "port", "8080")
-	if err := http.ListenAndServe("0.0.0.0:8080", mux); err != nil {
+
+	if err := http.ListenAndServe("0.0.0.0:8080", muxhandler); err != nil {
 		slog.Error("Failed to start server", "error", err)
+		os.Exit(1)
 	}
 }

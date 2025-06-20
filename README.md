@@ -13,6 +13,71 @@ directly. They should not have any incoming infrastructure requirements.
 
 <!-- end_slide -->
 
+## Diagram - Vision 
+
+```mermaid +render
+graph LR
+
+    client
+    geodns
+    subgraph IngressA
+        h8s-a
+    end
+
+    subgraph IngressB
+        h8s-b
+    end
+
+    subgraph IngressC
+        h8s-c
+    end
+
+    subgraph NATS
+        direction TB
+        subgraph NATS-A
+            NATS-A-Account[NATSAccount]
+        end
+        subgraph NATS-B
+            NATS-B-Account[NATSAccount]
+        end
+    end
+
+    subgraph Cloud 
+       CloudApp[YourApp<br>/endpoint1]
+    end
+
+    subgraph DC
+        DCApp[YourApp<br>/endpoint2]
+    end
+
+    subgraph wasmCloud 
+        subgraph Cloud 
+            WCApp1[YourApp<br>/endpoint3]
+        end
+        subgraph DC 
+            WCApp2[YourApp<br>/endpoint4]
+        end
+    end
+
+    client --> geodns
+    client -..->|http,ws| h8s-a
+    client -..->|http,ws| h8s-b
+    client -..->|http,ws| h8s-c
+    
+    NATS-A ==> |gateway| NATS-B
+    NATS-B ==> |gateway| NATS-A
+
+    h8s-a -...->|pub,sub| NATS
+    h8s-b -...->|pub,sub| NATS
+    h8s-c -...->|pub,sub| NATS
+
+    CloudApp -.->|pub,sub| NATS
+    DCApp -.->|pub,sub| NATS
+    WCApp1 -.->|pub,sub| NATS
+    WCApp2 -.->|pub,sub| NATS
+    
+```
+
 ## Diagram 1 - wasmCloud
 
 ```mermaid +render

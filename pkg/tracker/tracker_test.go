@@ -16,8 +16,12 @@ func TestInterestId(t *testing.T) {
 		interest Interest
 		want     string
 	}{
-		{"simple", Interest{"host1", "/path"}, "host1:/path"},
-		{"trailing slash", Interest{"host2", "/"}, "host2:/"},
+		{
+			"simple",
+			Interest{"host1", "/path", "GET"},
+			"host1:/path:GET",
+		},
+		{"trailing slash", Interest{"host2", "/", "GET"}, "host2:/:GET"},
 	}
 
 	for _, tt := range tests {

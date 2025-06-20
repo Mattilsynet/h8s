@@ -89,8 +89,14 @@ type H8Sproxy struct {
 	InterestOnly    bool
 	InterestTracker H8SInterestTracker
 	WSPool          *WSPool
-	Tracer          trace.Tracer // OpenTelemetry tracer for this connection
-	Meter           metric.Meter // OpenTelemetry meter for this connection
+
+	OTELEnabled bool
+	OTELTracer  trace.Tracer // OpenTelemetry tracer for this connection
+	OTELMeter   metric.Meter // OpenTelemetry meter for this connection
+
+	NumberOfRequests             metric.Int64Counter // Number of requests handled by this proxy
+	NumberOfFailedRequests       metric.Int64Counter // Number of failed requests
+	NumberOfWebsocketConnections metric.Int64Gauge   // Number of WebSocket connections established
 }
 
 var upgrader = websocket.Upgrader{
@@ -105,6 +111,7 @@ func NewH8Sproxy(natsConn *nats.Conn, opts ...Option) *H8Sproxy {
 		NATSConn:       natsConn,
 		RequestTimeout: time.Second * 2,
 		WSPool:         NewWSPool(),
+		OTELEnabled:    false,
 		InterestOnly:   false,
 	}
 	for _, opt := range opts {
@@ -117,6 +124,27 @@ func NewH8Sproxy(natsConn *nats.Conn, opts ...Option) *H8Sproxy {
 			os.Exit(1)
 		}
 	}
+
+	if proxy.OTELEnabled {
+		var err error
+
+		proxy.NumberOfRequests, err = proxy.OTELMeter.Int64Counter("number_of_requests")
+		if err != nil {
+			slog.Error("failed to create NumberOfRequests metric", "error", err)
+		}
+
+		proxy.NumberOfFailedRequests, err = proxy.OTELMeter.Int64Counter("number_of_failed_requests")
+		if err != nil {
+			slog.Error("failed to create NumberOfFailedRequests metric", "error", err)
+		}
+
+		proxy.NumberOfWebsocketConnections, err = proxy.OTELMeter.Int64Gauge("active_websocket_connections")
+		if err != nil {
+			slog.Error("failed to create NumberOfWebsocketConnections metric", "error", err)
+		}
+
+	}
+
 	return proxy
 }
 
@@ -146,13 +174,15 @@ func WithRequestTimeout(timeout time.Duration) Option {
 
 func WithOTELTracer(tracer trace.Tracer) Option {
 	return func(h8s *H8Sproxy) {
-		h8s.Tracer = tracer
+		h8s.OTELEnabled = true
+		h8s.OTELTracer = tracer
 	}
 }
 
 func WithOTELMeter(meter metric.Meter) Option {
 	return func(h8s *H8Sproxy) {
-		h8s.Meter = meter
+		h8s.OTELEnabled = true
+		h8s.OTELMeter = meter
 	}
 }
 
@@ -171,10 +201,8 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 		h8s.handleWebSocket(res, req)
 		return
 	}
-	if h8s.Tracer != nil {
-		_, span := h8s.Tracer.Start(req.Context(), "request")
-		defer span.End()
-	}
+	_, span := h8s.OTELTracer.Start(req.Context(), "request")
+	defer span.End()
 
 	// Scheme is not set in request, which is strange, we'll enforce that here.
 	req.URL.Scheme = "http"
@@ -201,22 +229,25 @@ func (h8s *H8Sproxy) Dummy(res http.ResponseWriter, req *http.Request) {
 	fmt.Println("Dummy")
 }
 
-func (h8s *H8Sproxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
+func (h8s *H8Sproxy) handleWebSocket(res http.ResponseWriter, req *http.Request) {
+	conn, err := upgrader.Upgrade(res, req, nil)
 	if err != nil {
 		slog.Error("WebSocket upgrade failed", "error", err)
 		return
 	}
 	defer conn.Close()
 
-	secKey := r.Header.Get("Sec-WebSocket-Key")
+	_, span := h8s.OTELTracer.Start(req.Context(), "websocket-connection")
+	defer span.End()
+
+	secKey := req.Header.Get("Sec-WebSocket-Key")
 	if secKey == "" {
 		slog.Warn("Missing Sec-WebSocket-Key")
-		http.Error(w, "Missing Sec-WebSocket-Key", http.StatusBadRequest)
+		http.Error(res, "Missing Sec-WebSocket-Key", http.StatusBadRequest)
 		return
 	}
 
-	sm := subjectmapper.NewSubjectMap(r)
+	sm := subjectmapper.NewSubjectMap(req)
 	subscribeSubject := sm.InboxSubjectPrefix()
 
 	wsConn := &WSConn{
@@ -224,7 +255,7 @@ func (h8s *H8Sproxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		Send:             make(chan []byte, 256),
 		PublishSubject:   sm.WebSocketPublishSubject(),
 		SubscribeSubject: subscribeSubject,
-		Headers:          r.Header.Clone(),
+		Headers:          req.Header.Clone(),
 	}
 
 	// If the connection is not in the pool, do a handshake publish with 0 bytes.
@@ -349,6 +380,7 @@ func httpRequestToNATSMessage(req *http.Request) *nats.Msg {
 			msg.Header.Add(key, v)
 		}
 	}
+
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
 		slog.Error("failed to read request body", "error", err)
