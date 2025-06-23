@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nuid"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -111,8 +112,10 @@ func NewH8Sproxy(natsConn *nats.Conn, opts ...Option) *H8Sproxy {
 		NATSConn:       natsConn,
 		RequestTimeout: time.Second * 2,
 		WSPool:         NewWSPool(),
-		OTELEnabled:    false,
 		InterestOnly:   false,
+		// The OTEL Meter and Tracer by default get a NOOP by default.
+		OTELTracer: otel.GetTracerProvider().Tracer("h8s-proxy"),
+		OTELMeter:  otel.GetMeterProvider().Meter("h8s-proxy"),
 	}
 	for _, opt := range opts {
 		opt(proxy)
@@ -125,26 +128,21 @@ func NewH8Sproxy(natsConn *nats.Conn, opts ...Option) *H8Sproxy {
 		}
 	}
 
-	if proxy.OTELEnabled {
-		var err error
-
-		proxy.NumberOfRequests, err = proxy.OTELMeter.Int64Counter("number_of_requests")
-		if err != nil {
-			slog.Error("failed to create NumberOfRequests metric", "error", err)
-		}
-
-		proxy.NumberOfFailedRequests, err = proxy.OTELMeter.Int64Counter("number_of_failed_requests")
-		if err != nil {
-			slog.Error("failed to create NumberOfFailedRequests metric", "error", err)
-		}
-
-		proxy.NumberOfWebsocketConnections, err = proxy.OTELMeter.Int64Gauge("active_websocket_connections")
-		if err != nil {
-			slog.Error("failed to create NumberOfWebsocketConnections metric", "error", err)
-		}
-
+	var err error
+	proxy.NumberOfRequests, err = proxy.OTELMeter.Int64Counter("number_of_requests")
+	if err != nil {
+		slog.Error("failed to create NumberOfRequests metric", "error", err)
 	}
 
+	proxy.NumberOfFailedRequests, err = proxy.OTELMeter.Int64Counter("number_of_failed_requests")
+	if err != nil {
+		slog.Error("failed to create NumberOfFailedRequests metric", "error", err)
+	}
+
+	proxy.NumberOfWebsocketConnections, err = proxy.OTELMeter.Int64Gauge("active_websocket_connections")
+	if err != nil {
+		slog.Error("failed to create NumberOfWebsocketConnections metric", "error", err)
+	}
 	return proxy
 }
 
@@ -174,14 +172,12 @@ func WithRequestTimeout(timeout time.Duration) Option {
 
 func WithOTELTracer(tracer trace.Tracer) Option {
 	return func(h8s *H8Sproxy) {
-		h8s.OTELEnabled = true
 		h8s.OTELTracer = tracer
 	}
 }
 
 func WithOTELMeter(meter metric.Meter) Option {
 	return func(h8s *H8Sproxy) {
-		h8s.OTELEnabled = true
 		h8s.OTELMeter = meter
 	}
 }
@@ -361,7 +357,7 @@ func (h8s *H8Sproxy) cmConnectionClosed(secKey string) {
 	err := h8s.NATSConn.PublishMsg(controlMsg)
 	if err != nil {
 		slog.Error(
-			"unable to pulish control message",
+			"unable to publish control message",
 			"message", controlMsg)
 	}
 	slog.Info(

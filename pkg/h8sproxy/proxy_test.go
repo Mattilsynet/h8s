@@ -2,7 +2,6 @@ package h8sproxy
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -139,25 +138,18 @@ func TestHttpReqToNATS_RequestReply_HeaderPropagation(t *testing.T) {
 
 // TestHandleWebSocket_NATSRequestReply tests the WebSocket handler with NATS "request-reply"
 // Apologise for the horrid code
-func TestHandleWebSocket_NATSRequestReply(t *testing.T) {
+func TestHandleWebSocket_NATSPubSubAndWS(t *testing.T) {
 	// Start embedded NATS server
 	ns := startEmbeddedNATSServer(t)
 	defer ns.Shutdown()
-
 	nc, err := nats.Connect(ns.ClientURL())
+
 	// nc, err := nats.Connect("nats://localhost:4222")
 	require.NoError(t, err)
 	defer nc.Drain()
 	defer nc.Close()
 
-	// Create proxy
-	proxy := &H8Sproxy{
-		NATSConn:       nc,
-		RequestTimeout: 5 * time.Second,
-		WSPool:         NewWSPool(),
-		OTELEnabled:    false,
-		InterestOnly:   false,
-	}
+	proxy := NewH8Sproxy(nc, WithRequestTimeout(5*time.Second))
 
 	// Setup test server
 	srv := httptest.NewServer(http.HandlerFunc(proxy.handleWebSocket))
@@ -193,11 +185,16 @@ func TestHandleWebSocket_NATSRequestReply(t *testing.T) {
 	err = ws.WriteMessage(websocket.TextMessage, []byte("ping"))
 	require.NoError(t, err)
 
-	time.Sleep(100 * time.Millisecond) // Give time for the message to be processed
+	//	time.Sleep(200 * time.Millisecond) // Give time for the message to be processed
 
 	// Expect the response from NATS over WS
 	_, resp, err := ws.ReadMessage()
-	fmt.Println("Response", string(resp))
+	t.Log("Response", string(resp))
 	require.NoError(t, err)
 	require.Equal(t, "pong", string(resp))
+
+	t.Log("Draining NATS connection...")
+	nc.Drain()
+	t.Log("Waiting 2 seconds before shutting down...")
+	time.Sleep(2 * time.Second) // Give time for the message to be processed
 }
