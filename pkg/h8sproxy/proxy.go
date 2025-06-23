@@ -130,17 +130,17 @@ func NewH8Sproxy(natsConn *nats.Conn, opts ...Option) *H8Sproxy {
 	}
 
 	var err error
-	proxy.NumberOfRequests, err = proxy.OTELMeter.Int64Counter("number_of_requests")
+	proxy.NumberOfRequests, err = proxy.OTELMeter.Int64Counter("h8s_number_of_requests")
 	if err != nil {
 		slog.Error("failed to create NumberOfRequests metric", "error", err)
 	}
 
-	proxy.NumberOfFailedRequests, err = proxy.OTELMeter.Int64Counter("number_of_failed_requests")
+	proxy.NumberOfFailedRequests, err = proxy.OTELMeter.Int64Counter("h8s_number_of_failed_requests")
 	if err != nil {
 		slog.Error("failed to create NumberOfFailedRequests metric", "error", err)
 	}
 
-	proxy.NumberOfWebsocketConnections, err = proxy.OTELMeter.Int64Gauge("active_websocket_connections")
+	proxy.NumberOfWebsocketConnections, err = proxy.OTELMeter.Int64Gauge("h8s_active_websocket_connections")
 	if err != nil {
 		slog.Error("failed to create NumberOfWebsocketConnections metric", "error", err)
 	}
