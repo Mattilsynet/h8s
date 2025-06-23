@@ -98,6 +98,7 @@ type H8Sproxy struct {
 	NumberOfRequests             metric.Int64Counter // Number of requests handled by this proxy
 	NumberOfFailedRequests       metric.Int64Counter // Number of failed requests
 	NumberOfWebsocketConnections metric.Int64Gauge   // Number of WebSocket connections established
+	NumberOfIntrests             metric.Int64Gauge   // Number of interests registered
 }
 
 var upgrader = websocket.Upgrader{
@@ -183,6 +184,8 @@ func WithOTELMeter(meter metric.Meter) Option {
 }
 
 func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
+	h8s.NumberOfRequests.Add(req.Context(), 1)
+
 	// TODO:, check HostFilters
 	if h8s.InterestOnly {
 		if !h8s.InterestTracker.ValidRequest(*req) {
@@ -197,6 +200,7 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 		h8s.handleWebSocket(res, req)
 		return
 	}
+
 	_, span := h8s.OTELTracer.Start(req.Context(), "request")
 	defer span.End()
 
@@ -262,6 +266,8 @@ func (h8s *H8Sproxy) handleWebSocket(res http.ResponseWriter, req *http.Request)
 	h8s.WSPool.Set(secKey, wsConn)
 	defer h8s.WSPool.Remove(secKey)
 
+	h8s.NumberOfWebsocketConnections.Record(req.Context(), int64(h8s.WSPool.ActiveConnections()))
+
 	// Subscribe to per-client reply subject, get data from the backend, and send to client.
 	sub, err := h8s.NATSConn.Subscribe(subscribeSubject, func(msg *nats.Msg) {
 		select {
@@ -288,7 +294,7 @@ func (h8s *H8Sproxy) handleWebSocket(res http.ResponseWriter, req *http.Request)
 		}
 	}()
 
-	// Read data from WebSocket connection and publish to nats.
+	// Read incoming data from client on WebSocket connection and publish to nats.
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {

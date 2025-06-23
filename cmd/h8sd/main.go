@@ -29,13 +29,13 @@ type NATSConnectionOptions struct {
 }
 
 var (
-	NATSOptions     NATSConnectionOptions
-	natsURLFlag     = flag.String("nats-url", "", "NATS server URL")
-	natsCredsFlag   = flag.String("nats-creds", "", "Path to NATS credentials file (optional)")
-	trackInterest   = flag.Bool("track-interest", false, "Enbles Interest Tracker for self configuration. Will no longer accept arbitrary request when enabled.")
-	otelEnabledFlag = flag.Bool("otel-enabled", false, "Enable OpenTelemetry tracing and metrics")
-	otelEndpoint    = flag.String("otel-endpoint", "", "")
-	otel            = &othell.Othell{}
+	NATSOptions       NATSConnectionOptions
+	natsURLFlag       = flag.String("nats-url", "", "NATS server URL")
+	natsCredsFlag     = flag.String("nats-creds", "", "Path to NATS credentials file (optional)")
+	trackInterestFlag = flag.Bool("track-interest", false, "Enbles Interest Tracker for self configuration. Will no longer accept arbitrary request when enabled.")
+	otelEnabledFlag   = flag.Bool("otel-enabled", false, "Enable OpenTelemetry tracing and metrics")
+	otelEndpoint      = flag.String("otel-endpoint", "", "")
+	otel              = &othell.Othell{}
 )
 
 func NATSConnect(opts NATSConnectionOptions) (*nats.Conn, error) {
@@ -134,8 +134,17 @@ func main() {
 	// Construct slice of Options for h8sproxy factory based on command line flags.
 	var executionOptions []h8s.Option
 
-	if *trackInterest {
-		h8stracker := tracker.NewInterestTracker(nc, h8s.H8SControlSubjectPrefix+".interest")
+	if *trackInterestFlag {
+		var itOptions []tracker.InterestTrackerOption
+		itOptions = append(itOptions, tracker.WithInterestSubject(h8s.H8SInterestControlSubject+".interest"))
+		if *otelEnabledFlag {
+			itOptions = append(itOptions, tracker.WithOTELMeter(otel.Meter))
+		}
+
+		h8stracker := tracker.NewInterestTracker(
+			nc,
+			itOptions...)
+
 		executionOptions = append(executionOptions, h8s.WithInterestOnly())
 		executionOptions = append(executionOptions, h8s.WithInterestTracker(h8stracker))
 	}
