@@ -19,16 +19,45 @@ type ServiceRequestHandler interface {
 	Handle(micro.Request)
 }
 
-// Service is a NATS-based client for h8s proxy communication
+type ServiceWebsocketHandler interface {
+	Read(msg *nats.Msg)
+	Write(msg *nats.Msg)
+}
+
+type WebsocketHandlerConfig struct {
+	Name           string
+	Description    string
+	Host           string
+	Path           string
+	ReceiveSubject string
+	QueueGroup     string
+	Handler        ServiceWebsocketHandler
+}
+
+func NewWebsocketHandlerConfig(host string, path string) *WebsocketHandlerConfig {
+	sm := subjectmapper.NewWebSocketMap(
+		fmt.Sprintf("ws://%v%v", host, path))
+
+	config := &WebsocketHandlerConfig{
+		Name:           fmt.Sprintf("ws %v%v", host, path),
+		ReceiveSubject: sm.PublishSubject(),
+		QueueGroup:     fmt.Sprintf("h8ss-ws-%v%v", host, path),
+	}
+	return config
+}
+
+// Service is a server-client for the h8s proxy
 type Service struct {
 	ctx                    context.Context
 	wg                     sync.WaitGroup
 	natsConn               *nats.Conn
 	subjectPrefix          string
 	InterestPublishSubject string
+	ControlMessageSubject  string
 	requestServices        map[string]micro.Config
-	websocketServices      map[string]string
-	Services               []micro.Service
+	websocketServices      map[string]*WebsocketHandlerConfig
+	websocketConnections   map[string]string
+	requestReplyServices   []micro.Service
 }
 
 // Option is a function that can be used to configure the Client
@@ -54,7 +83,7 @@ func NewService(nc *nats.Conn, opts ...Option) *Service {
 		natsConn:          nc,
 		subjectPrefix:     subjectmapper.SubjectPrefix,
 		requestServices:   make(map[string]micro.Config),
-		websocketServices: make(map[string]string),
+		websocketServices: make(map[string]*WebsocketHandlerConfig),
 	}
 
 	for _, opt := range opts {
@@ -65,7 +94,7 @@ func NewService(nc *nats.Conn, opts ...Option) *Service {
 }
 
 func (c *Service) Run() {
-	c.wg.Add(2)
+	c.wg.Add(3)
 
 	for _, config := range c.requestServices {
 		service, err := micro.AddService(c.natsConn, config)
@@ -73,13 +102,22 @@ func (c *Service) Run() {
 			slog.Error("unable to add request service", "error", err, "name", config.Name, "subject", config.Endpoint.Subject)
 			c.wg.Done()
 		}
-		c.Services = append(c.Services, service)
+		c.requestReplyServices = append(c.requestReplyServices, service)
 		if err != nil {
 			c.wg.Done()
 		}
 		slog.Info("added request service", "name", config.Name, "subject", config.Endpoint.Subject)
 	}
 
+	// Set up subscribers for incoming data over websockets
+	for _, config := range c.websocketServices {
+		_, err := c.natsConn.QueueSubscribe(config.ReceiveSubject, config.QueueGroup, config.Handler.Read)
+		if err != nil {
+			slog.Error("failed to subscribe to websocket subject", "error", err, "subject", config.ReceiveSubject)
+		}
+	}
+
+	// Publish interests periodically
 	go func() {
 		for {
 			for _, config := range c.requestServices {
@@ -97,13 +135,31 @@ func (c *Service) Run() {
 					slog.Error("unable to publish Interest", "error", err, "subject", config.Endpoint.Subject)
 				}
 			}
+
+			for _, config := range c.websocketServices {
+				interest := tracker.Interest{
+					Host:   config.Host,
+					Path:   config.Path,
+					Method: "ws",
+				}
+				bytes, err := json.Marshal(interest)
+				if err != nil {
+					slog.Error("unable to marshal Interest", "error", err)
+					continue
+				}
+				if err := c.natsConn.Publish(c.InterestPublishSubject, bytes); err != nil {
+					slog.Error("unable to publish Interest", "error", err, "subject", config.ReceiveSubject)
+				}
+
+			}
+
 			time.Sleep(5 * time.Second) // Publish interest every 30 seconds
 		}
 	}()
 
 	go func() {
 		<-c.ctx.Done()
-		for _, service := range c.Services {
+		for _, service := range c.requestReplyServices {
 			service.Stop()
 		}
 		c.wg.Done()
@@ -117,7 +173,7 @@ func (c *Service) AddRequestHandler(host string, path string, method string, svc
 	metadata["method"] = method
 
 	c.requestServices[host+path] = micro.Config{
-		Name:        "test",
+		Name:        fmt.Sprintf("%v %v%v", method, host, path),
 		Metadata:    metadata,
 		Version:     "0.0.1",
 		Description: fmt.Sprintf("%s https://%s%s", method, host, path),
@@ -127,6 +183,11 @@ func (c *Service) AddRequestHandler(host string, path string, method string, svc
 			QueueGroup: fmt.Sprintf("h8ss-%v-%v-%v", method, host, path),
 		},
 	}
+}
+
+func (c *Service) AddWebsocketHandler(wssvc *WebsocketHandlerConfig, swh ServiceWebsocketHandler) {
+	wssvc.Handler = swh
+	c.websocketServices[wssvc.Name] = wssvc
 }
 
 func (c *Service) Shutdown() {

@@ -1,3 +1,9 @@
+/*
+Package subjectmapper package is responsible for the contract and
+conventions of mapping HTTP requests to NATS subjects.
+
+WARNING: This needs redesign, can be greatly simplified.
+*/
 package subjectmapper
 
 import (

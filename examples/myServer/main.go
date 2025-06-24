@@ -26,6 +26,10 @@ func main() {
 		h8sservice.WithInterestPublishSubject(h8sproxy.H8SInterestControlSubject))
 	svc.AddRequestHandler("localhost", "/echo", "POST", myHandler{})
 	svc.AddRequestHandler("localhost", "/html", "GET", myHTMLHandler{})
+
+	// Websocket handler needs to be instantiated before adding to the service
+	wsh := &websocketThingy{}
+	svc.AddWebsocketHandler(h8sservice.NewWebsocketHandlerConfig("localhost", "/ws"), wsh)
 	go svc.Run()
 
 	sig := make(chan os.Signal, 1)
@@ -47,4 +51,16 @@ type myHTMLHandler struct{}
 
 func (myHTMLHandler) Handle(r micro.Request) {
 	r.Respond([]byte("<html><body><h1>Hello, World!</h1></body></html>"))
+}
+
+type websocketThingy struct{}
+
+func (websocketThingy) Read(msg *nats.Msg) {
+	// Handle incoming websocket messages
+	slog.Info("Received message: %s", "message", msg.Data)
+}
+
+func (websocketThingy) Write(msg *nats.Msg) {
+	// Handle outgoing websocket messages
+	slog.Info("Writing message", "handler", msg.Data)
 }
