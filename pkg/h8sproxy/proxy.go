@@ -15,6 +15,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nuid"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -184,7 +185,11 @@ func WithOTELMeter(meter metric.Meter) Option {
 }
 
 func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
-	h8s.NumberOfRequests.Add(req.Context(), 1)
+	h8s.NumberOfRequests.Add(req.Context(), 1,
+		metric.WithAttributes(
+			attribute.String("method", req.Method),
+			attribute.String("path", req.URL.Path),
+		))
 
 	// TODO:, check HostFilters
 	if h8s.InterestOnly {

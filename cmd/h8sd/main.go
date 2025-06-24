@@ -32,7 +32,7 @@ var (
 	NATSOptions       NATSConnectionOptions
 	natsURLFlag       = flag.String("nats-url", "", "NATS server URL")
 	natsCredsFlag     = flag.String("nats-creds", "", "Path to NATS credentials file (optional)")
-	trackInterestFlag = flag.Bool("track-interest", false, "Enbles Interest Tracker for self configuration. Will no longer accept arbitrary request when enabled.")
+	trackInterestFlag = flag.Bool("track-interest", false, "Enable Interest Tracker for self configuration. (Will no longer accept arbitrary request when enabled.)")
 	otelEnabledFlag   = flag.Bool("otel-enabled", false, "Enable OpenTelemetry tracing and metrics")
 	otelEndpoint      = flag.String("otel-endpoint", "", "")
 	otel              = &othell.Othell{}
