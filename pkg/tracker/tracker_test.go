@@ -76,7 +76,7 @@ func TestInterestTrackerRun(t *testing.T) {
 	defer nc.Close()
 
 	subject := "test.interests"
-	tracker := NewInterestTracker(nc, subject)
+	tracker := NewInterestTracker(nc, WithInterestSubject(subject))
 	err = tracker.Run()
 	require.NoError(t, err)
 

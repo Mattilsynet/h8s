@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Mattilsynet/h8s/internal/natstest"
 	"github.com/Mattilsynet/h8s/pkg/subjectmapper"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/micro"
@@ -17,7 +18,10 @@ func (myTestHandler) Handle(r micro.Request) {
 }
 
 func TestAddRequestServiceAndHandlerInvoke(t *testing.T) {
-	nc, err := nats.Connect(nats.DefaultURL)
+	ns := natstest.StartEmbeddedNATSServer(t)
+	defer ns.Shutdown()
+
+	nc, err := nats.Connect(ns.ClientURL())
 	if err != nil {
 		t.Fatalf("failed to connect to NATS: %v", err)
 	}
