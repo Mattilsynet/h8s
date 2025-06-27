@@ -1,3 +1,5 @@
+// Package h8sproxy provides a reverse proxy for HTTP and WebSocket connections.
+// Can be used as a http handler.
 package h8sproxy
 
 import (
@@ -21,8 +23,11 @@ import (
 )
 
 const (
-	H8SControlSubjectPrefix   = "h8s.control"
-	H8SInterestControlSubject = H8SControlSubjectPrefix + ".interest"
+	H8SControlSubjectPrefix        = "h8s.control"
+	H8sControlWebsocketAll         = H8SControlSubjectPrefix + ".ws.conn."
+	H8SControlWebsocketEstablished = H8SControlSubjectPrefix + ".ws.conn.established"
+	H8SControlWebsocketClosed      = H8SControlSubjectPrefix + ".ws.conn.closed"
+	H8SInterestControlSubject      = H8SControlSubjectPrefix + ".interest"
 )
 
 type WSConn struct {
@@ -348,7 +353,7 @@ func (h8s *H8Sproxy) handleWebSocket(res http.ResponseWriter, req *http.Request)
 func (h8s *H8Sproxy) cmConnectionEstablished(wsConn *WSConn) {
 	// Soft include of controlMessage on establish of websocket connection.
 	controlMessage := &nats.Msg{
-		Subject: H8SControlSubjectPrefix + ".ws.conn.established",
+		Subject: H8SControlWebsocketEstablished,
 		Reply:   wsConn.SubscribeSubject,
 		Header:  nats.Header(wsConn.Headers),
 	}
@@ -374,7 +379,7 @@ func (h8s *H8Sproxy) cmConnectionClosed(secKey string) {
 	}
 
 	controlMsg := &nats.Msg{
-		Subject: H8SControlSubjectPrefix + ".ws.conn.closed",
+		Subject: H8SControlWebsocketClosed,
 		Reply:   wsConn.SubscribeSubject,
 		Header:  nats.Header(wsConn.Headers),
 	}
