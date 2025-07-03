@@ -248,8 +248,8 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 
 	reply, err := h8s.NATSConn.RequestMsg(msg, h8s.RequestTimeout)
 	if err != nil {
-		slog.Error("Failed to publish message", "error", err, "message", msg)
-		http.Error(res, fmt.Sprintf("Error: %s", err), http.StatusGatewayTimeout)
+		slog.Error("Failed to publish message, no responder", "error", err, "message", msg)
+		http.Error(res, "Not Found", http.StatusNotFound)
 		return
 	}
 	slog.Debug("Received reply", "reply-inbox", reply.Sub.Subject)
