@@ -29,13 +29,14 @@ type NATSConnectionOptions struct {
 }
 
 var (
-	NATSOptions       NATSConnectionOptions
-	natsURLFlag       = flag.String("nats-url", "", "NATS server URL")
-	natsCredsFlag     = flag.String("nats-creds", "", "Path to NATS credentials file (optional)")
-	trackInterestFlag = flag.Bool("track-interest", false, "Enable Interest Tracker for self configuration. (Will no longer accept arbitrary request when enabled.)")
-	otelEnabledFlag   = flag.Bool("otel-enabled", false, "Enable OpenTelemetry tracing and metrics")
-	otelEndpoint      = flag.String("otel-endpoint", "", "")
-	otel              = &othell.Othell{}
+	NATSOptions          NATSConnectionOptions
+	natsURLFlag          = flag.String("nats-url", "", "NATS server URL")
+	natsCredsFlag        = flag.String("nats-creds", "", "Path to NATS credentials file (optional)")
+	trackInterestFlag    = flag.Bool("track-interest", false, "Enable Interest Tracker for self configuration. (Will no longer accept arbitrary request when enabled.)")
+	otelEnabledFlag      = flag.Bool("otel-enabled", false, "Enable OpenTelemetry tracing and metrics")
+	otelEndpoint         = flag.String("otel-endpoint", "", "")
+	otel                 = &othell.Othell{}
+	authorizationKeyFlag = flag.String("authorization-key", "", "Naive authorization key for all endpoints.")
 )
 
 func NATSConnect(opts NATSConnectionOptions) (*nats.Conn, error) {
@@ -152,6 +153,11 @@ func main() {
 	if *otelEnabledFlag {
 		executionOptions = append(executionOptions, h8s.WithOTELMeter(otel.Meter))
 		executionOptions = append(executionOptions, h8s.WithOTELTracer(otel.Tracer))
+	}
+
+	if len(*authorizationKeyFlag) > 0 {
+		slog.Info("Naive authorization mode enabled")
+		executionOptions = append(executionOptions, h8s.WithNaiveAuthorizationKey(*authorizationKeyFlag))
 	}
 
 	h8sproxy := h8s.NewH8Sproxy(

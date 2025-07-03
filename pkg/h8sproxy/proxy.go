@@ -97,9 +97,10 @@ type H8Sproxy struct {
 	InterestTracker H8SInterestTracker
 	WSPool          *WSPool
 
-	OTELEnabled bool
-	OTELTracer  trace.Tracer // OpenTelemetry tracer for this connection
-	OTELMeter   metric.Meter // OpenTelemetry meter for this connection
+	NaiveAuthorizationKey string // If true, the proxy with authorize against
+
+	OTELTracer trace.Tracer // OpenTelemetry tracer for this connection
+	OTELMeter  metric.Meter // OpenTelemetry meter for this connection
 
 	NumberOfRequests             metric.Int64Counter // Number of requests handled by this proxy
 	NubmerOfDeniedRequests       metric.Int64Counter //
@@ -203,7 +204,20 @@ func WithOTELMeter(meter metric.Meter) Option {
 	}
 }
 
+func WithNaiveAuthorizationKey(key string) Option {
+	return func(h8s *H8Sproxy) {
+		h8s.NaiveAuthorizationKey = key
+	}
+}
+
 func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
+	if h8s.NaiveAuthorizationKey != "" {
+		if req.Header.Get("Authorization") != h8s.NaiveAuthorizationKey {
+			res.Header().Set("Content-Type", "text/plain")
+			res.WriteHeader(http.StatusForbidden)
+			return
+		}
+	}
 	h8s.NumberOfRequests.Add(req.Context(), 1,
 		metric.WithAttributes(
 			attribute.String("method", req.Method),
@@ -234,7 +248,7 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 
 	reply, err := h8s.NATSConn.RequestMsg(msg, h8s.RequestTimeout)
 	if err != nil {
-		slog.Error("Failed to publish message", "error", err)
+		slog.Error("Failed to publish message", "error", err, "message", msg)
 		http.Error(res, fmt.Sprintf("Error: %s", err), http.StatusGatewayTimeout)
 		return
 	}
