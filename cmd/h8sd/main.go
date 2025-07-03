@@ -37,6 +37,7 @@ var (
 	otelEndpoint         = flag.String("otel-endpoint", "", "")
 	otel                 = &othell.Othell{}
 	authorizationKeyFlag = flag.String("authorization-key", "", "Naive authorization key for all endpoints.")
+	publishOnlyFlag      = flag.Bool("publish-only", false, "Enable publish-only mode, expect no reply's everyting will become 200 OK")
 )
 
 func NATSConnect(opts NATSConnectionOptions) (*nats.Conn, error) {
@@ -158,6 +159,11 @@ func main() {
 	if len(*authorizationKeyFlag) > 0 {
 		slog.Info("Naive authorization mode enabled")
 		executionOptions = append(executionOptions, h8s.WithNaiveAuthorizationKey(*authorizationKeyFlag))
+	}
+
+	if *publishOnlyFlag {
+		slog.Info("Running in publish only mode for http requests. All requests will get 200 OK.")
+		executionOptions = append(executionOptions, h8s.WithPublishOnly())
 	}
 
 	h8sproxy := h8s.NewH8Sproxy(

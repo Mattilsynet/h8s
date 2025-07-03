@@ -97,7 +97,10 @@ type H8Sproxy struct {
 	InterestTracker H8SInterestTracker
 	WSPool          *WSPool
 
-	NaiveAuthorizationKey string // If true, the proxy with authorize against
+	// With this set to true, h8s will not expect a reply. All incoming requests will be publish only.
+	PublishOnly bool
+	// NaiveAuthorizationKey when set will go a "naive" authorization against key on all endpoints.
+	NaiveAuthorizationKey string
 
 	OTELTracer trace.Tracer // OpenTelemetry tracer for this connection
 	OTELMeter  metric.Meter // OpenTelemetry meter for this connection
@@ -122,6 +125,7 @@ func NewH8Sproxy(natsConn *nats.Conn, opts ...Option) *H8Sproxy {
 		RequestTimeout: time.Second * 2,
 		WSPool:         NewWSPool(),
 		InterestOnly:   false,
+		PublishOnly:    false,
 		// The OTEL Meter and Tracer by default get a NOOP by default.
 		OTELTracer: otel.GetTracerProvider().Tracer("h8s-proxy"),
 		OTELMeter:  otel.GetMeterProvider().Meter("h8s-proxy"),
@@ -210,6 +214,12 @@ func WithNaiveAuthorizationKey(key string) Option {
 	}
 }
 
+func WithPublishOnly() Option {
+	return func(h8s *H8Sproxy) {
+		h8s.PublishOnly = true
+	}
+}
+
 func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 	if h8s.NaiveAuthorizationKey != "" {
 		if req.Header.Get("Authorization") != h8s.NaiveAuthorizationKey {
@@ -245,6 +255,16 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 	// Scheme is not set in request, which is strange, we'll enforce that here.
 	req.URL.Scheme = "http"
 	msg := httpRequestToNATSMessage(req)
+
+	// TODO: handle the different operation modes better.
+
+	if h8s.PublishOnly {
+		if err := h8s.NATSConn.PublishMsg(msg); err != nil {
+			slog.Error("Unable to publish nats msg in PublishOnly mode", "error", "err", "message", msg)
+		}
+		res.WriteHeader(http.StatusOK)
+		return
+	}
 
 	reply, err := h8s.NATSConn.RequestMsg(msg, h8s.RequestTimeout)
 	if err != nil {
