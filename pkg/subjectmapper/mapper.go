@@ -21,16 +21,6 @@ const (
 	WebScoketMethod = "ws"
 )
 
-type SubjectMap struct {
-	Request *http.Request
-	// Request path from the HTTP request sanitized for used in NATS Subject
-	Path string
-	// Reversed host for NATS Subject. IP's will not be reversed.
-	Host          string
-	SubjectPrefix string
-	InboxPrefix   string
-}
-
 type SubjectMapOption func(*SubjectMap)
 
 type SubjectMapper interface {
@@ -52,6 +42,16 @@ func WithInboxPrefix(prefix string) SubjectMapOption {
 	}
 }
 
+type SubjectMap struct {
+	Request *http.Request
+	// Request path from the HTTP request sanitized for used in NATS Subject
+	Path string
+	// Reversed host for NATS Subject. IP's will not be reversed.
+	Host          string
+	SubjectPrefix string
+	InboxPrefix   string
+}
+
 func NewSubjectMap(req *http.Request, options ...SubjectMapOption) *SubjectMap {
 	sm := &SubjectMap{
 		Request:       req,
@@ -69,7 +69,7 @@ func NewSubjectMap(req *http.Request, options ...SubjectMapOption) *SubjectMap {
 	} else {
 		// Process Host to reverse it. Host names are reverse
 		// IP octet is kept.
-		// Port is dropped, not relevant in NATS.
+		// Port is dropped, not relevant in NATS and _INBOXes are used for return traffic.
 		sm.processHost(req.Host)
 	}
 
@@ -185,8 +185,7 @@ func (sm *SubjectMap) PublishSubject() string {
 		sm.Path,
 	},
 		".")
-
-	return subject
+	return strings.TrimSuffix(subject, ".")
 }
 
 func (sm *SubjectMap) WebSocketPublishSubject() string {
@@ -271,18 +270,32 @@ func isIP(host string) bool {
 	return ip != nil
 }
 
+// processPath builds a NATS subject from an HTTP path.
+//
+// Rules:
+//   - URL Decode and encode parts
+//   - Within each URL segment, encode literal '.' as %2E so it won't split NATS tokens.
+//   - Collapse duplicate/trailing slashes.
 func (sm *SubjectMap) processPath(path string) {
-	decoded, err := url.PathUnescape(path)
-	if err != nil {
-		decoded = path // fallback to original if malformed
+	parts := strings.Split(path, "/")
+	var safe []string
+
+	// Also encode NATS wildcards if you might receive them in input:
+	// wild := strings.NewReplacer("*", "%2A", ">", "%3E")
+	for _, p := range parts {
+		if p == "" {
+			continue // collapse // and /// etc.
+		}
+		// urldecode/encode, todo: figure out the best way to handle the error
+		p, _ = url.PathUnescape(p)
+		p = url.PathEscape(p)
+
+		// Encode '.' inside a segment to avoid subject part collisions.
+		p = strings.ReplaceAll(p, ".", "%2E")
+
+		if p != "" {
+			safe = append(safe, p)
+		}
 	}
-	segments := strings.FieldsFunc(decoded, func(r rune) bool { return r == '/' })
-	safeSegments := make([]string, len(segments))
-	for i, s := range segments {
-		safeSegments[i] = strings.ReplaceAll(s, ".", "_")
-	}
-	if len(safeSegments) == 0 {
-		sm.Path = "root"
-	}
-	sm.Path = strings.Join(safeSegments, ".")
+	sm.Path = strings.Join(safe, ".")
 }

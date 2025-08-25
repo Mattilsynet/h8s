@@ -121,21 +121,39 @@ func TestSubjectMapperPublishSubject(t *testing.T) {
 	}{
 		{
 			name:          "Basic HTTP GET",
-			subjectPrefix: "prefix",
+			subjectPrefix: SubjectPrefix,
 			scheme:        "http",
 			method:        "GET",
 			host:          "example.com",
 			path:          "some/path",
-			want:          "prefix.http.GET.example.com.some/path",
+			want:          SubjectPrefix + ".http.GET.com.example.some.path",
 		},
 		{
 			name:          "HTTPS POST with no path",
-			subjectPrefix: "srv",
+			subjectPrefix: SubjectPrefix,
 			scheme:        "https",
 			method:        "POST",
 			host:          "api.myservice.local",
 			path:          "",
-			want:          "srv.https.POST.api.myservice.local.",
+			want:          SubjectPrefix + ".https.POST.local.myservice.api",
+		},
+		{
+			name:          "HTTP GET with . and _",
+			subjectPrefix: SubjectPrefix,
+			scheme:        "http",
+			method:        "GET",
+			host:          "api.myservice.local",
+			path:          "/.oidc/_callback",
+			want:          SubjectPrefix + ".http.GET.local.myservice.api.%2Eoidc._callback",
+		},
+		{
+			name:          "HTTP GET with dots in foldername",
+			subjectPrefix: SubjectPrefix,
+			scheme:        "http",
+			method:        "GET",
+			host:          "api.myservice.local",
+			path:          "/stuff%2Eduff/resize",
+			want:          SubjectPrefix + ".http.GET.local.myservice.api.stuff%2Eduff.resize",
 		},
 		// Add more cases as needed, for example an empty SubjectPrefix,
 		// custom methods, odd hostnames, or path variations
@@ -146,18 +164,15 @@ func TestSubjectMapperPublishSubject(t *testing.T) {
 			// Create a fake request with the specified scheme and method
 			req := &http.Request{
 				Method: tt.method,
+				Host:   tt.host,
 				URL: &url.URL{
 					Scheme: tt.scheme,
+					Path:   tt.path,
 				},
 			}
 
 			// Instantiate the SubjectMapper with test data
-			sm := &SubjectMap{
-				SubjectPrefix: tt.subjectPrefix,
-				Request:       req,
-				Host:          tt.host,
-				Path:          tt.path,
-			}
+			sm := NewSubjectMap(req, WithSubjectPrefix(SubjectPrefix))
 
 			// Invoke PublishSubject() and compare
 			got := sm.PublishSubject()
