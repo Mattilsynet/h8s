@@ -452,6 +452,8 @@ func httpRequestToNATSMessage(req *http.Request) *nats.Msg {
 	// This can be used to inform downstream business logic that
 	// does not do any direct NATS communication.
 	msg.Header.Add("X-H8S-PublishSubject", msg.Subject)
+	// Propagate the original query string as a header
+	msg.Header.Add("X-H8S-Original-Query", req.URL.RawQuery)
 
 	return msg
 }
