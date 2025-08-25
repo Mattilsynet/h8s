@@ -299,3 +299,18 @@ func (sm *SubjectMap) processPath(path string) {
 	}
 	sm.Path = strings.Join(safe, ".")
 }
+
+// ReqFromArgs creates an *http.Request from the given arguments.
+// Should reduce the number of support functions and different usecases in the module.
+func ReqFromArgs(scheme string, host string, path string, method string) *http.Request {
+	// Publish a request matching the service's subject
+	req := &http.Request{
+		Method: "GET",
+		Host:   host,
+		URL: &url.URL{
+			Scheme: scheme,
+			Path:   path,
+		},
+	}
+	return req
+}

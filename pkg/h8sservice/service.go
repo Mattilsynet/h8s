@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -180,7 +182,7 @@ func (c *Service) Run() {
 	// Listen for websocket connection events
 	go func() {
 		if _, err := c.natsConn.Subscribe(
-			h8sproxy.H8sControlWebsocketAll,
+			h8sproxy.H8SControlWebsocketAll,
 			func(msg *nats.Msg) {
 				switch msg.Subject {
 				case h8sproxy.H8SControlWebsocketClosed:
@@ -194,7 +196,7 @@ func (c *Service) Run() {
 			slog.Error(
 				"failed to subscribe to control subject",
 				"error", err,
-				"subject", h8sproxy.H8SControlSubjectPrefix)
+				"subject", h8sproxy.H8SControlWebsocketAll)
 		}
 	}()
 
@@ -247,19 +249,29 @@ func (c *Service) Run() {
 	}()
 }
 
-func (c *Service) AddRequestHandler(host string, path string, method string, svc RequestServiceHandler) {
+func (c *Service) AddRequestHandler(host string, path string, method string, scheme string, svc RequestServiceHandler) {
 	metadata := make(map[string]string)
 	metadata["host"] = host
 	metadata["path"] = path
 	metadata["method"] = method
+	metadata["scheme"] = scheme
+
+	req := &http.Request{
+		Method: method,
+		Host:   host,
+		URL: &url.URL{
+			Scheme: scheme,
+			Path:   path,
+		},
+	}
 
 	c.requestServices[host+path] = micro.Config{
 		Name:        nuid.New().Next(),
 		Metadata:    metadata,
 		Version:     "0.0.1",
-		Description: fmt.Sprintf("%s https://%s%s", method, host, path),
+		Description: fmt.Sprintf("%s %s://%s%s", method, scheme, host, path),
 		Endpoint: &micro.EndpointConfig{
-			Subject:    subjectmapper.NewSubjectMapFromParts(host, path, method).PublishSubject(),
+			Subject:    subjectmapper.NewSubjectMap(req).PublishSubject(),
 			Handler:    micro.HandlerFunc(svc.Handle),
 			QueueGroup: fmt.Sprintf("h8ss-%v-%v-%v", method, host, path),
 		},

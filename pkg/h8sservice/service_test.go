@@ -33,7 +33,7 @@ func TestAddRequestServiceAndHandlerInvoke(t *testing.T) {
 
 	host := "localhost"
 	path := "/testpath"
-	client.AddRequestHandler(host, path, "GET", myTestHandler{})
+	client.AddRequestHandler(host, path, "GET", "https", myTestHandler{})
 
 	// Prepare cancelable context
 	ctx, cancel := context.WithCancel(context.Background())
@@ -46,7 +46,8 @@ func TestAddRequestServiceAndHandlerInvoke(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// Publish a request matching the service's subject
-	subject := subjectmapper.NewSubjectMapFromParts(host, path, "GET").PublishSubject()
+
+	subject := subjectmapper.NewSubjectMap(subjectmapper.ReqFromArgs("https", host, path, "GET")).PublishSubject()
 	t.Logf("Using subject: %s", subject)
 	resp, err := nc.Request(subject, []byte("test"), 2*time.Second)
 	if err != nil {

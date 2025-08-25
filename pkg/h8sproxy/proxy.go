@@ -24,7 +24,7 @@ import (
 
 const (
 	H8SControlSubjectPrefix        = "h8s.control"
-	H8sControlWebsocketAll         = H8SControlSubjectPrefix + ".ws.conn."
+	H8SControlWebsocketAll         = H8SControlSubjectPrefix + ".ws.conn.*"
 	H8SControlWebsocketEstablished = H8SControlSubjectPrefix + ".ws.conn.established"
 	H8SControlWebsocketClosed      = H8SControlSubjectPrefix + ".ws.conn.closed"
 	H8SInterestControlSubject      = H8SControlSubjectPrefix + ".interest"
