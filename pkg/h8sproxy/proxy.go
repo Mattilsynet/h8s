@@ -28,6 +28,10 @@ const (
 	H8SControlWebsocketEstablished = H8SControlSubjectPrefix + ".ws.conn.established"
 	H8SControlWebsocketClosed      = H8SControlSubjectPrefix + ".ws.conn.closed"
 	H8SInterestControlSubject      = H8SControlSubjectPrefix + ".interest"
+
+	H8SPublishSubjectHTTPHeaderName = "X-H8s-PublishSubject"
+	H8SOriginalQueryHTTPHeaderName  = "X-H8s-Original-Query"
+	H8SReplySubjectHTTPHeaderName   = "X-H8s-ReplySubject"
 )
 
 type WSConn struct {
@@ -391,7 +395,7 @@ func (h8s *H8Sproxy) cmConnectionEstablished(wsConn *WSConn) {
 		Reply:   wsConn.SubscribeSubject,
 		Header:  nats.Header(wsConn.Headers),
 	}
-	controlMessage.Header.Add("X-H8S-PublishSubject", wsConn.PublishSubject)
+	controlMessage.Header.Add(H8SPublishSubjectHTTPHeaderName, wsConn.PublishSubject)
 
 	controlErr := h8s.NATSConn.PublishMsg(controlMessage)
 	if controlErr != nil {
@@ -451,9 +455,9 @@ func httpRequestToNATSMessage(req *http.Request) *nats.Msg {
 	// Add propagation of nats subject as X-H8S-Subject header
 	// This can be used to inform downstream business logic that
 	// does not do any direct NATS communication.
-	msg.Header.Add("X-H8S-PublishSubject", msg.Subject)
+	msg.Header.Add(H8SPublishSubjectHTTPHeaderName, msg.Subject)
 	// Propagate the original query string as a header
-	msg.Header.Add("X-H8S-Original-Query", req.URL.RawQuery)
+	msg.Header.Add(H8SOriginalQueryHTTPHeaderName, req.URL.RawQuery)
 
 	return msg
 }
