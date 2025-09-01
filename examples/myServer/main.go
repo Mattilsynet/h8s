@@ -48,8 +48,8 @@ func main() {
 		nc,
 		h8sservice.WithInterestPublishSubject(h8sproxy.H8SInterestControlSubject),
 	)
-	svc.AddRequestHandler("localhost", "/echo", "POST", myHandler{})
-	svc.AddRequestHandler("localhost", "/html", "GET", myHTMLHandler{})
+	svc.AddRequestHandler("localhost", "/echo", "POST", "https", myHandler{})
+	svc.AddRequestHandler("localhost", "/html", "GET", "https", myHTMLHandler{})
 
 	wss := &websocketThingy{
 		Ctx: ctx,

@@ -65,7 +65,7 @@ func TestEvictStale(t *testing.T) {
 	require.NotContains(t, it.InterestSeen, id)
 }
 
-func TestInterestTrackerRun(t *testing.T) {
+func TestInterestTrackerWithCustomInterestSubject(t *testing.T) {
 	ns := natstest.StartEmbeddedNATSServer(t)
 	defer ns.Shutdown()
 
