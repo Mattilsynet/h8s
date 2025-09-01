@@ -179,7 +179,6 @@ func TestHandleWebSocket_NATSPubSubAndWS(t *testing.T) {
 		u.String(),
 		http.Header{"X-WS-Test": []string{"Websocket yay!"}})
 	require.NoError(t, err)
-	defer ws.Close()
 
 	// Send message to trigger the handler
 	err = ws.WriteMessage(websocket.TextMessage, []byte("ping"))
@@ -192,6 +191,9 @@ func TestHandleWebSocket_NATSPubSubAndWS(t *testing.T) {
 	t.Log("Response", string(resp))
 	require.NoError(t, err)
 	require.Equal(t, "pong", string(resp))
+
+	// Explicitly close the WS connection
+	require.NoError(t, ws.Close())
 
 	t.Log("Draining NATS connection...")
 	nc.Drain()

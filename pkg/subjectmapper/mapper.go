@@ -7,7 +7,6 @@ WARNING: This needs redesign, can be greatly simplified.
 package subjectmapper
 
 import (
-	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -76,51 +75,6 @@ func NewSubjectMap(req *http.Request, options ...SubjectMapOption) *SubjectMap {
 	// Process Path and build part of a NATS subject.
 	sm.processPath(req.URL.Path)
 
-	return sm
-}
-
-func NewSubjectMapFromParts(host string, path string, method string, options ...SubjectMapOption) *SubjectMap {
-	sm := &SubjectMap{
-		Request:       nil,
-		SubjectPrefix: SubjectPrefix,
-		InboxPrefix:   InboxPrefix,
-	}
-
-	for _, opt := range options {
-		opt(sm)
-	}
-
-	sreq, err := processRequestURL(fmt.Sprintf("http://%v/%v", host, path))
-	sreq.Method = method
-	if err != nil {
-		slog.Error("failed to process request URL", "error", err)
-	}
-
-	sm.Request = sreq
-	sm.processHost(sreq.Host)
-	sm.processPath(sreq.URL.Path)
-	return sm
-}
-
-func NewSubjectMapFromURL(urlStr string, options ...SubjectMapOption) *SubjectMap {
-	sm := &SubjectMap{
-		Request:       nil,
-		SubjectPrefix: SubjectPrefix,
-		InboxPrefix:   InboxPrefix,
-	}
-
-	for _, opt := range options {
-		opt(sm)
-	}
-
-	sreq, err := processRequestURL("http://" + urlStr)
-	if err != nil {
-		slog.Error("failed to process request URL", "error", err)
-	}
-
-	sm.Request = sreq
-	sm.processHost(sreq.Host)
-	sm.processPath(sreq.URL.Path)
 	return sm
 }
 
@@ -300,9 +254,9 @@ func (sm *SubjectMap) processPath(path string) {
 	sm.Path = strings.Join(safe, ".")
 }
 
-// ReqFromArgs creates an *http.Request from the given arguments.
+// HTTPReqFromArgs creates an *http.Request from the given arguments.
 // Should reduce the number of support functions and different usecases in the module.
-func ReqFromArgs(scheme string, host string, path string, method string) *http.Request {
+func HTTPReqFromArgs(scheme string, host string, path string, method string) *http.Request {
 	// Publish a request matching the service's subject
 	req := &http.Request{
 		Method: "GET",

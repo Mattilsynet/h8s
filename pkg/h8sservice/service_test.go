@@ -47,7 +47,7 @@ func TestAddRequestServiceAndHandlerInvoke(t *testing.T) {
 
 	// Publish a request matching the service's subject
 
-	subject := subjectmapper.NewSubjectMap(subjectmapper.ReqFromArgs("https", host, path, "GET")).PublishSubject()
+	subject := subjectmapper.NewSubjectMap(subjectmapper.HTTPReqFromArgs("https", host, path, "GET")).PublishSubject()
 	t.Logf("Using subject: %s", subject)
 	resp, err := nc.Request(subject, []byte("test"), 2*time.Second)
 	if err != nil {
