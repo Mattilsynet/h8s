@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -270,21 +271,61 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	reply, err := h8s.NATSConn.RequestMsg(msg, h8s.RequestTimeout)
+	ctx := req.Context()
+
+	// Subscribe before publishing
+	sub, err := h8s.NATSConn.SubscribeSync(msg.Reply)
 	if err != nil {
-		slog.Error("Failed to publish message, no responder", "error", err, "message", msg)
-		http.Error(res, "Not Found", http.StatusNotFound)
+		http.Error(res, "Bad gateway", http.StatusBadGateway)
 		return
 	}
-	slog.Debug("Received reply", "reply-inbox", reply.Sub.Subject)
+	defer sub.Unsubscribe()
 
-	// write reply headers to responsewriter
-	for key, values := range reply.Header {
-		res.Header().Add(key, strings.Join(values, ","))
+	// Make sure subscription is active before publishing
+	if err := h8s.NATSConn.Flush(); err != nil {
+		http.Error(res, "NATS Not ready", http.StatusBadGateway)
+		return
 	}
-	res.Header().Add("Content-Length", fmt.Sprintf("%d", len(reply.Data)))
-	// write reply.Data to responsewriter
-	res.Write(reply.Data)
+
+	if err := h8s.NATSConn.PublishMsg(msg); err != nil {
+		slog.Error("Failed to publish request", "error", err)
+		http.Error(res, "Bad gateway", http.StatusBadGateway)
+		return
+	}
+
+	var wroteHeaders bool
+	flusher, _ := res.(http.Flusher)
+
+	for {
+		rm, err := sub.NextMsgWithContext(ctx)
+		if err != nil {
+			if !wroteHeaders {
+				http.Error(res, "Gateway timeout", http.StatusGatewayTimeout)
+			}
+			break
+		}
+
+		if !wroteHeaders {
+			CopyHeadersOnce(res, rm.Header)
+			wroteHeaders = true
+		}
+
+		if len(rm.Data) > 0 {
+			if _, werr := res.Write(rm.Data); werr != nil {
+				break
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+
+		more := rm.Header.Get("More")
+		eof := rm.Header.Get("EOF")
+		if strings.EqualFold(eof, "true") || strings.EqualFold(more, "false") ||
+			(more == "" && wroteHeaders) {
+			break
+		}
+	}
 }
 
 func (h8s *H8Sproxy) Dummy(res http.ResponseWriter, req *http.Request) {
@@ -460,4 +501,36 @@ func httpRequestToNATSMessage(req *http.Request) *nats.Msg {
 	msg.Header.Add(H8SOriginalQueryHTTPHeaderName, req.URL.RawQuery)
 
 	return msg
+}
+
+// CopyHeadersOnce copies relevant headers from a NATS reply message
+// to the http.ResponseWriter and writes the status code immediately.
+func CopyHeadersOnce(res http.ResponseWriter, h nats.Header) {
+	statusCode := http.StatusOK
+
+	if s := h.Get("Status"); s != "" {
+		if v, convErr := strconv.Atoi(strings.TrimSpace(s)); convErr == nil && v >= 100 && v <= 999 {
+			statusCode = v
+		}
+	}
+
+	for k, vals := range h {
+		kn := http.CanonicalHeaderKey(k)
+		switch kn {
+		case "Status", "Content-Length", "Date", "Connection",
+			"Keep-Alive", "Upgrade", "Trailer", "Transfer-Encoding":
+			continue
+		}
+		for _, v := range vals {
+			res.Header().Add(kn, v)
+		}
+	}
+
+	if te := h.Get("Transfer-Encoding"); strings.EqualFold(te, "chunked") {
+		// omit Content-Length so Go will chunk automatically
+	} else if cl := h.Get("Content-Length"); cl != "" {
+		res.Header().Set("Content-Length", cl)
+	}
+
+	res.WriteHeader(statusCode)
 }
