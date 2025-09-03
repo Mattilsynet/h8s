@@ -276,6 +276,7 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 	// Subscribe before publishing
 	sub, err := h8s.NATSConn.SubscribeSync(msg.Reply)
 	if err != nil {
+		slog.Error("Unable to subscribe", "subject", msg.Reply)
 		http.Error(res, "Bad gateway", http.StatusBadGateway)
 		return
 	}
@@ -317,7 +318,10 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 			if flusher != nil {
 				flusher.Flush()
 			}
+		} else {
+			break
 		}
+
 	}
 }
 
@@ -510,8 +514,7 @@ func CopyHeadersOnce(res http.ResponseWriter, h nats.Header) {
 	for k, vals := range h {
 		kn := http.CanonicalHeaderKey(k)
 		switch kn {
-		case "Status", "Content-Length", "Date", "Connection",
-			"Keep-Alive", "Upgrade", "Trailer", "Transfer-Encoding":
+		case "Content-Length":
 			continue
 		}
 		for _, v := range vals {
@@ -520,7 +523,7 @@ func CopyHeadersOnce(res http.ResponseWriter, h nats.Header) {
 	}
 
 	if te := h.Get("Transfer-Encoding"); strings.EqualFold(te, "chunked") {
-		// omit Content-Length so Go will chunk automatically
+		h.Del("Content-Length")
 	} else if cl := h.Get("Content-Length"); cl != "" {
 		res.Header().Set("Content-Length", cl)
 	}
