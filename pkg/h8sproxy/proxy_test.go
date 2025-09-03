@@ -1,6 +1,7 @@
 package h8sproxy
 
 import (
+	"bufio"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -199,4 +200,94 @@ func TestHandleWebSocket_NATSPubSubAndWS(t *testing.T) {
 	nc.Drain()
 	t.Log("Waiting 2 seconds before shutting down...")
 	time.Sleep(2 * time.Second) // Give time for the message to be processed
+}
+
+func TestHTTPProxy_ChunkedTransferEncoding(t *testing.T) {
+	t.Helper()
+
+	ns := startEmbeddedNATSServer(t)
+	defer ns.Shutdown()
+
+	nc, err := nats.Connect(ns.ClientURL())
+	require.NoError(t, err)
+	defer nc.Drain()
+
+	// Start the proxy under test
+	proxy := NewH8Sproxy(nc, WithRequestTimeout(5*time.Second))
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", proxy.Handler)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// Request we’ll send to the proxy
+	method := http.MethodGet
+	host := "localhost"
+	path := "/chunked/response"
+
+	// Subject mapping used by the proxy
+	rm := subjectmapper.NewSubjectMap(&http.Request{
+		Method: method,
+		Host:   host,
+		URL:    &url.URL{Scheme: "http", Path: path},
+	})
+	pubSubj := rm.PublishSubject()
+	t.Logf("Backend subscribing to subject: %s", pubSubj)
+
+	chunks := [][]byte{
+		[]byte("part-0\n"),
+		[]byte("part-1\n"),
+		[]byte("part-2\n"),
+		[]byte("part-3\n"),
+	}
+
+	// Backend: publish multiple replies to the dynamic _INBOX reply
+	sub, err := nc.Subscribe(pubSubj, func(m *nats.Msg) {
+		if m.Reply == "" {
+			t.Errorf("expected reply subject (_INBOX.*), got empty")
+			return
+		}
+		for _, c := range chunks {
+			if pubErr := nc.PublishMsg(&nats.Msg{Subject: m.Reply, Data: c}); pubErr != nil {
+				t.Logf("publish chunk error: %v", pubErr)
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+
+	// Ensure the subscription is registered before sending the HTTP request
+	require.NoError(t, nc.FlushTimeout(1*time.Second))
+
+	// Send the HTTP request to the proxy
+	req, err := http.NewRequest(method, srv.URL+path, nil)
+	require.NoError(t, err)
+	req.Host = host
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	// For HTTP/1.x, chunked is expected (no Content-Length)
+	if resp.ProtoMajor == 1 {
+		require.Contains(t, resp.TransferEncoding, "chunked")
+		require.Empty(t, resp.Header.Get("Content-Length"))
+	}
+
+	// Read progressively and stop once we've seen all expected chunks
+	sc := bufio.NewScanner(resp.Body)
+	var got []string
+	for sc.Scan() {
+		got = append(got, sc.Text())
+		if len(got) == len(chunks) {
+			break
+		}
+	}
+	require.NoError(t, sc.Err())
+
+	want := []string{"part-0", "part-1", "part-2", "part-3"}
+	require.Equal(t, want, got, "proxy should stream each NATS reply to the HTTP client in order")
 }

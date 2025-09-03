@@ -318,13 +318,6 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 				flusher.Flush()
 			}
 		}
-
-		more := rm.Header.Get("More")
-		eof := rm.Header.Get("EOF")
-		if strings.EqualFold(eof, "true") || strings.EqualFold(more, "false") ||
-			(more == "" && wroteHeaders) {
-			break
-		}
 	}
 }
 
