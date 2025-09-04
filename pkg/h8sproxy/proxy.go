@@ -308,6 +308,7 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 
 		if !wroteHeaders {
 			CopyHeadersOnce(res, rm.Header)
+			slog.Info("reply headers", "headers", res.Header())
 			wroteHeaders = true
 		}
 
@@ -318,11 +319,13 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 			if flusher != nil {
 				flusher.Flush()
 			}
+			rm.Ack()
 		} else {
+			slog.Info("no more content")
 			break
 		}
-
 	}
+	slog.Info("we broke")
 }
 
 func (h8s *H8Sproxy) Dummy(res http.ResponseWriter, req *http.Request) {
@@ -511,17 +514,19 @@ func CopyHeadersOnce(res http.ResponseWriter, h nats.Header) {
 		}
 	}
 
+	// Make headers canonical and assign values
 	for k, vals := range h {
 		kn := http.CanonicalHeaderKey(k)
-		switch kn {
-		case "Content-Length":
-			continue
-		}
-		for _, v := range vals {
-			res.Header().Add(kn, v)
+		for i, v := range vals {
+			if i == 0 {
+				res.Header().Set(kn, v)
+			} else {
+				res.Header().Add(kn, v)
+			}
 		}
 	}
 
+	slog.Info("Transfer-Encoding", "value", h.Get("Transfer-Encoding"))
 	if te := h.Get("Transfer-Encoding"); strings.EqualFold(te, "chunked") {
 		h.Del("Content-Length")
 	} else if cl := h.Get("Content-Length"); cl != "" {
