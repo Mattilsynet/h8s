@@ -3,6 +3,7 @@
 package h8sproxy
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log/slog"
@@ -313,6 +314,10 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 		}
 
 		if len(rm.Data) > 0 {
+			if bytes.Equal(rm.Data, []byte("0\r\n\r\n")) {
+				slog.Info("got terminating chunk")
+				break
+			}
 			if _, werr := res.Write(rm.Data); werr != nil {
 				break
 			}
