@@ -299,7 +299,9 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 	flusher, _ := res.(http.Flusher)
 
 	for {
+
 		rm, err := sub.NextMsgWithContext(ctx)
+
 		if err != nil {
 			if !wroteHeaders {
 				http.Error(res, "Gateway timeout", http.StatusGatewayTimeout)
@@ -318,13 +320,19 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 				slog.Info("got terminating chunk")
 				break
 			}
+			if rm.Header.Get("Content-Length") == "" {
+				rm.Data = append(rm.Data, []byte("\n")...)
+			}
 			if _, werr := res.Write(rm.Data); werr != nil {
+				slog.Error("Failed to write response", "error", werr)
 				break
 			}
 			if flusher != nil {
 				flusher.Flush()
 			}
-			rm.Ack()
+			if rm.Header.Get("Content-Length") != "" {
+				break
+			}
 		} else {
 			slog.Info("no more content")
 			break
