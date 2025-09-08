@@ -301,7 +301,6 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 	for {
 
 		rm, err := sub.NextMsgWithContext(ctx)
-
 		if err != nil {
 			if !wroteHeaders {
 				http.Error(res, "Gateway timeout", http.StatusGatewayTimeout)
@@ -319,9 +318,6 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 			if bytes.Equal(rm.Data, []byte("0\r\n\r\n")) {
 				slog.Info("got terminating chunk")
 				break
-			}
-			if rm.Header.Get("Content-Length") == "" {
-				rm.Data = append(rm.Data, []byte("\n")...)
 			}
 			if _, werr := res.Write(rm.Data); werr != nil {
 				slog.Error("Failed to write response", "error", werr)
