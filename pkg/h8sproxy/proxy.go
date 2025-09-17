@@ -508,6 +508,7 @@ func httpRequestToNATSMessage(req *http.Request) *nats.Msg {
 	msg.Header.Add(H8SPublishSubjectHTTPHeaderName, msg.Subject)
 	// Propagate the original query string as a header
 	msg.Header.Add(H8SOriginalQueryHTTPHeaderName, req.URL.RawQuery)
+	msg.Header.Add(H8SReplySubjectHTTPHeaderName, msg.Reply)
 
 	return msg
 }
