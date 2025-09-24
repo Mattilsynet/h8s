@@ -301,7 +301,6 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 	flusher, _ := res.(http.Flusher)
 
 	for {
-
 		rm, err := sub.NextMsgWithContext(ctx)
 		if err != nil {
 			if !wroteHeaders {
@@ -336,7 +335,7 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 			break
 		}
 	}
-	if err := h8s.NATSConn.Publish(msg.Header.Get(H8SConnectionCloseSubjectHeaderName), nil); err != nil {
+	if err := h8s.NATSConn.Publish(msg.Header.Get(H8SConnectionCloseSubjectHeaderName), []byte("closed")); err != nil {
 		slog.Warn(
 			"failed to publish connection closed message",
 			"subject",
@@ -344,6 +343,8 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 			"error",
 			err)
 	}
+	fmt.Println("after connection close publish")
+	h8s.NATSConn.Flush()
 }
 
 func (h8s *H8Sproxy) Dummy(res http.ResponseWriter, req *http.Request) {
