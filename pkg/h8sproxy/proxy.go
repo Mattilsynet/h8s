@@ -25,15 +25,17 @@ import (
 )
 
 const (
-	H8SControlSubjectPrefix        = "h8s.control"
-	H8SControlWebsocketAll         = H8SControlSubjectPrefix + ".ws.conn.*"
-	H8SControlWebsocketEstablished = H8SControlSubjectPrefix + ".ws.conn.established"
-	H8SControlWebsocketClosed      = H8SControlSubjectPrefix + ".ws.conn.closed"
-	H8SInterestControlSubject      = H8SControlSubjectPrefix + ".interest"
+	H8SControlSubjectPrefix                 = "h8s.control"
+	H8SControlWebsocketAll                  = H8SControlSubjectPrefix + ".ws.conn.*"
+	H8SControlWebsocketEstablished          = H8SControlSubjectPrefix + ".ws.conn.established"
+	H8SControlWebsocketClosed               = H8SControlSubjectPrefix + ".ws.conn.closed"
+	H8SInterestControlSubject               = H8SControlSubjectPrefix + ".interest"
+	H8SControlConnectionClosedSubjectPrefix = H8SControlSubjectPrefix + ".connection.closed"
 
-	H8SPublishSubjectHTTPHeaderName = "X-H8s-PublishSubject"
-	H8SOriginalQueryHTTPHeaderName  = "X-H8s-Original-Query"
-	H8SReplySubjectHTTPHeaderName   = "X-H8s-ReplySubject"
+	H8SPublishSubjectHTTPHeaderName     = "X-H8s-PublishSubject"
+	H8SOriginalQueryHTTPHeaderName      = "X-H8s-Original-Query"
+	H8SReplySubjectHTTPHeaderName       = "X-H8s-ReplySubject"
+	H8SConnectionCloseSubjectHeaderName = "X-H8s-Connection-Close-Subject"
 )
 
 type WSConn struct {
@@ -334,7 +336,14 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 			break
 		}
 	}
-	slog.Info("we broke")
+	if err := h8s.NATSConn.Publish(msg.Header.Get(H8SConnectionCloseSubjectHeaderName), nil); err != nil {
+		slog.Warn(
+			"failed to publish connection closed message",
+			"subject",
+			msg.Header.Get(H8SConnectionCloseSubjectHeaderName),
+			"error",
+			err)
+	}
 }
 
 func (h8s *H8Sproxy) Dummy(res http.ResponseWriter, req *http.Request) {
@@ -509,6 +518,9 @@ func httpRequestToNATSMessage(req *http.Request) *nats.Msg {
 	// Propagate the original query string as a header
 	msg.Header.Add(H8SOriginalQueryHTTPHeaderName, req.URL.RawQuery)
 	msg.Header.Add(H8SReplySubjectHTTPHeaderName, msg.Reply)
+	msg.Header.Add(
+		H8SConnectionCloseSubjectHeaderName,
+		fmt.Sprintf("%v.%v", H8SControlConnectionClosedSubjectPrefix, nuid.Next()))
 
 	return msg
 }
