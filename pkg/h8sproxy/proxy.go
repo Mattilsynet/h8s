@@ -311,7 +311,6 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 
 		if !wroteHeaders {
 			CopyHeadersOnce(res, rm.Header)
-			slog.Info("reply headers", "headers", res.Header())
 			wroteHeaders = true
 		}
 
@@ -335,8 +334,9 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 			break
 		}
 	}
+
 	if err := h8s.NATSConn.Publish(msg.Header.Get(H8SConnectionCloseSubjectHeaderName), []byte("closed")); err != nil {
-		slog.Warn(
+		slog.Error(
 			"failed to publish connection closed message",
 			"subject",
 			msg.Header.Get(H8SConnectionCloseSubjectHeaderName),
@@ -549,7 +549,6 @@ func CopyHeadersOnce(res http.ResponseWriter, h nats.Header) {
 		}
 	}
 
-	slog.Info("Transfer-Encoding", "value", h.Get("Transfer-Encoding"))
 	if te := h.Get("Transfer-Encoding"); strings.EqualFold(te, "chunked") {
 		h.Del("Content-Length")
 	} else if cl := h.Get("Content-Length"); cl != "" {
