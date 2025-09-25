@@ -4,6 +4,8 @@ package h8sproxy
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -229,6 +231,8 @@ func WithPublishOnly() Option {
 }
 
 func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
+	ctx := req.Context()
+
 	if h8s.NaiveAuthorizationKey != "" {
 		if req.Header.Get("Authorization") != h8s.NaiveAuthorizationKey {
 			res.Header().Set("Content-Type", "text/plain")
@@ -264,7 +268,19 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 	req.URL.Scheme = "http"
 	msg := httpRequestToNATSMessage(req)
 
-	// TODO: handle the different operation modes better.
+	var (
+		wroteHeaders = false
+		reason       = "completed"
+		once         sync.Once
+		subject      = msg.Header.Get(H8SConnectionCloseSubjectHeaderName)
+	)
+
+	defer once.Do(func() {
+		if subject != "" {
+			_ = h8s.NATSConn.Publish(subject, []byte(reason))
+			_ = h8s.NATSConn.FlushTimeout(60 * time.Millisecond)
+		}
+	})
 
 	if h8s.PublishOnly {
 		if err := h8s.NATSConn.PublishMsg(msg); err != nil {
@@ -273,8 +289,6 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 		res.WriteHeader(http.StatusOK)
 		return
 	}
-
-	ctx := req.Context()
 
 	// Subscribe before publishing
 	sub, err := h8s.NATSConn.SubscribeSync(msg.Reply)
@@ -297,54 +311,59 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	var wroteHeaders bool
 	flusher, _ := res.(http.Flusher)
 
+loop:
 	for {
-		rm, err := sub.NextMsgWithContext(ctx)
-		if err != nil {
+		select {
+		case <-ctx.Done():
+			slog.Info("http request context canceled", "err", ctx.Err())
+			reason = "ctx_done"
+			return
+
+		default:
+			rm, err := sub.NextMsgWithContext(ctx)
+			if err != nil {
+				// this will also fire if ctx is canceled
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					slog.Info("nats receive canceled", "err", err)
+					reason = "ctx_done"
+				} else {
+					slog.Error("nats receive failed", "err", err)
+					reason = "nats_error"
+				}
+				return
+			}
+
 			if !wroteHeaders {
-				http.Error(res, "Gateway timeout", http.StatusGatewayTimeout)
+				copyHeadersOnce(res, rm.Header)
+				wroteHeaders = true
 			}
-			break
-		}
 
-		if !wroteHeaders {
-			CopyHeadersOnce(res, rm.Header)
-			wroteHeaders = true
-		}
+			if len(rm.Data) > 0 {
+				if bytes.Equal(rm.Data, []byte("0\r\n\r\n")) {
+					slog.Info("got terminating chunk")
+					reason = "termination_chunk"
+					break loop
+				}
 
-		if len(rm.Data) > 0 {
-			if bytes.Equal(rm.Data, []byte("0\r\n\r\n")) {
-				slog.Info("got terminating chunk")
-				break
-			}
-			if _, werr := res.Write(rm.Data); werr != nil {
-				slog.Error("Failed to write response", "error", werr)
-				break
-			}
-			if flusher != nil {
+				if _, werr := res.Write(rm.Data); werr != nil {
+					slog.Error("Failed to write response", "error", werr)
+					reason = "write_error"
+					break loop
+				}
+
 				flusher.Flush()
+
+				if rm.Header.Get("Content-Length") != "" {
+					// Just one response
+					break loop
+				}
+			} else {
+				break loop
 			}
-			if rm.Header.Get("Content-Length") != "" {
-				break
-			}
-		} else {
-			slog.Info("no more content")
-			break
 		}
 	}
-
-	if err := h8s.NATSConn.Publish(msg.Header.Get(H8SConnectionCloseSubjectHeaderName), []byte("closed")); err != nil {
-		slog.Error(
-			"failed to publish connection closed message",
-			"subject",
-			msg.Header.Get(H8SConnectionCloseSubjectHeaderName),
-			"error",
-			err)
-	}
-	fmt.Println("after connection close publish")
-	h8s.NATSConn.Flush()
 }
 
 func (h8s *H8Sproxy) Dummy(res http.ResponseWriter, req *http.Request) {
@@ -528,7 +547,7 @@ func httpRequestToNATSMessage(req *http.Request) *nats.Msg {
 
 // CopyHeadersOnce copies relevant headers from a NATS reply message
 // to the http.ResponseWriter and writes the status code immediately.
-func CopyHeadersOnce(res http.ResponseWriter, h nats.Header) {
+func copyHeadersOnce(res http.ResponseWriter, h nats.Header) {
 	statusCode := http.StatusOK
 
 	if s := h.Get("Status"); s != "" {
