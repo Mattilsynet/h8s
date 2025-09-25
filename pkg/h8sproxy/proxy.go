@@ -291,6 +291,7 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 	}
 
 	// Subscribe before publishing
+	slog.Info("handler subscribe", "subject", msg.Reply)
 	sub, err := h8s.NATSConn.SubscribeSync(msg.Reply)
 	if err != nil {
 		slog.Error("Unable to subscribe", "subject", msg.Reply)
@@ -340,6 +341,15 @@ loop:
 				wroteHeaders = true
 			}
 
+			slog.Info("got response data", "header", rm.Header, "data", rm.Data)
+
+			// Responses with header Content-Length set are treated as single responses.
+			if cl := rm.Header.Get("Content-Length"); cl != "" {
+				res.Write(rm.Data)
+				return
+			}
+
+			// Handle responses without Content-Length (SSE/Chunked transfer encoding)
 			if len(rm.Data) > 0 {
 				if bytes.Equal(rm.Data, []byte("0\r\n\r\n")) {
 					slog.Info("got terminating chunk")
@@ -354,11 +364,6 @@ loop:
 				}
 
 				flusher.Flush()
-
-				if rm.Header.Get("Content-Length") != "" {
-					// Just one response
-					break loop
-				}
 			} else {
 				break loop
 			}

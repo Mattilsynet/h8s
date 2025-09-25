@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -48,8 +49,8 @@ func main() {
 		nc,
 		h8sservice.WithInterestPublishSubject(h8sproxy.H8SInterestControlSubject),
 	)
-	svc.AddRequestHandler("localhost", "/echo", "POST", "https", myHandler{})
-	svc.AddRequestHandler("localhost", "/html", "GET", "https", myHTMLHandler{})
+	svc.AddRequestHandler("localhost", "/echo", "POST", "http", myHandler{})
+	svc.AddRequestHandler("localhost", "/html", "GET", "http", myHTMLHandler{})
 
 	wss := &websocketThingy{
 		Ctx: ctx,
@@ -79,10 +80,13 @@ func (myHandler) Handle(r micro.Request) {
 type myHTMLHandler struct{}
 
 func (myHTMLHandler) Handle(r micro.Request) {
-	r.Respond([]byte("<html><body><h1>Hello, World!</h1></body></html>"))
-}
+	response := []byte("<html><body><h1>Hello, World!</h1></body></html>")
 
-// TODO: Need to better construct your websocket struct.
+	headers := nats.Header{}
+	headers.Add("Content-Length", fmt.Sprintf("%d", len(response)))
+
+	r.Respond(response, micro.WithHeaders(micro.Headers(headers)))
+}
 
 type websocketThingy struct {
 	Ctx              context.Context
