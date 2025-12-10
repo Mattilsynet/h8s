@@ -341,7 +341,8 @@ loop:
 				wroteHeaders = true
 			}
 
-			slog.Info("got response data", "header", rm.Header, "data", rm.Data)
+			// Removed logging to reduce noise and prevent possible data leakage.
+			// slog.Info("got response data", "header", rm.Header, "data", rm.Data)
 
 			// Responses with header Content-Length set are treated as single responses.
 			if cl := rm.Header.Get("Content-Length"); cl != "" {
