@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,9 +21,11 @@ import (
 // It can subscribe to a filtered set of subjects based on the subjectmapper rules.
 
 type ReverseProxy struct {
-	nats    *nats.Conn
-	client  *http.Client
-	wsConns sync.Map // map[string]*websocket.Conn (key is Reply subject)
+	nats       *nats.Conn
+	client     *http.Client
+	wsConns    sync.Map // map[string]*websocket.Conn (key is Reply subject)
+	BackendURL *url.URL // Optional: Forward all requests to this backend
+	FilterHost string   // Optional: Only handle requests for this host (original hostname)
 }
 
 // NewReverseProxy creates a proxy with a default HTTP client.
@@ -49,6 +52,33 @@ func (r *ReverseProxy) SubscribeAll(ctx context.Context) error {
 		"h8s.control.ws.conn.established",
 		"h8s.control.ws.conn.closed",
 	}
+	for _, pat := range patterns {
+		_, err := r.nats.Subscribe(pat, r.handleMsg)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SubscribeForHost subscribes to subjects specific to a given hostname.
+func (r *ReverseProxy) SubscribeForHost(ctx context.Context, host string) error {
+	// Reverse the host using subjectmapper logic
+	req, err := http.NewRequest("GET", "http://"+host, nil)
+	if err != nil {
+		return err
+	}
+	sm := subjectmapper.NewSubjectMap(req)
+	reversedHost := sm.ReversedHost()
+
+	patterns := []string{
+		subjectmapper.SubjectPrefix + ".http.*." + reversedHost + ".>",
+		subjectmapper.SubjectPrefix + ".http.*." + reversedHost,
+		subjectmapper.SubjectPrefix + ".ws.ws." + reversedHost + ".>",
+		"h8s.control.ws.conn.established",
+		"h8s.control.ws.conn.closed",
+	}
+
 	for _, pat := range patterns {
 		_, err := r.nats.Subscribe(pat, r.handleMsg)
 		if err != nil {
@@ -93,7 +123,37 @@ func (r *ReverseProxy) handleMsg(msg *nats.Msg) {
 		path = strings.Join(parts[4:], "/")
 	}
 
-	urlStr := scheme + "://" + host + "/" + path
+	var urlStr string
+	if r.BackendURL != nil {
+		// Use configured backend
+		// Construct URL using backend scheme and host, but keep the path from the request
+		// Note: Request path from subject might already be empty or not what we want if we want to proxy to root?
+		// But in NATS subject, path is what came in.
+		// If BackendURL is http://localhost:8080, we want http://localhost:8080/path
+
+		targetPath := path
+		if r.BackendURL.Path != "" {
+			// If backend has a path prefix, join it? simple concatenation for now
+			if strings.HasSuffix(r.BackendURL.Path, "/") && strings.HasPrefix(targetPath, "/") {
+				targetPath = r.BackendURL.Path + targetPath[1:]
+			} else if !strings.HasSuffix(r.BackendURL.Path, "/") && !strings.HasPrefix(targetPath, "/") {
+				targetPath = r.BackendURL.Path + "/" + targetPath
+			} else {
+				targetPath = r.BackendURL.Path + targetPath
+			}
+		}
+
+		u := *r.BackendURL // copy
+		u.Path = targetPath
+		// Query params? Subject mapping might not include them in path, usually they are in headers or not handled by basic mapping
+		// h8sproxy puts query string in a header? Not seeing one.
+		// Reconstructing from subject only gives path.
+
+		urlStr = u.String()
+	} else {
+		urlStr = scheme + "://" + host + "/" + path
+	}
+
 	req, err := http.NewRequest(method, urlStr, bytes.NewReader(msg.Data))
 	if err != nil {
 		slog.Error("new request", "error", err)
@@ -184,8 +244,16 @@ func (r *ReverseProxy) publishError(msg *nats.Msg, code int, errStr string) {
 }
 
 func (r *ReverseProxy) handleControlEstablished(msg *nats.Msg) {
+	// Filter by host if configured
+	hostHeader := msg.Header.Get("Host")
+	if r.FilterHost != "" && hostHeader != "" {
+		if !strings.EqualFold(hostHeader, r.FilterHost) {
+			return
+		}
+	}
+
 	// Use Host header to determine backend URL
-	host := msg.Header.Get("Host")
+	host := hostHeader
 	if host == "" {
 		// Fallback to subject parsing if Host header is missing (less reliable)
 		publishSubject := msg.Header.Get("X-H8s-PublishSubject")
@@ -221,6 +289,26 @@ func (r *ReverseProxy) handleControlEstablished(msg *nats.Msg) {
 	}
 
 	u := "ws://" + host + path
+	if r.BackendURL != nil {
+		// Use configured backend
+		scheme := "ws"
+		if r.BackendURL.Scheme == "https" {
+			scheme = "wss"
+		}
+
+		targetPath := path
+		if r.BackendURL.Path != "" {
+			if strings.HasSuffix(r.BackendURL.Path, "/") && strings.HasPrefix(targetPath, "/") {
+				targetPath = r.BackendURL.Path + targetPath[1:]
+			} else if !strings.HasSuffix(r.BackendURL.Path, "/") && !strings.HasPrefix(targetPath, "/") {
+				targetPath = r.BackendURL.Path + "/" + targetPath
+			} else {
+				targetPath = r.BackendURL.Path + targetPath
+			}
+		}
+
+		u = scheme + "://" + r.BackendURL.Host + targetPath
+	}
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,

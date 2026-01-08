@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"time"
 
@@ -31,6 +32,8 @@ var (
 	otelEnabledFlag = flag.Bool("otel-enabled", false, "Enable OpenTelemetry tracing and metrics")
 	otelEndpoint    = flag.String("otel-endpoint", "", "")
 	otel            = &othell.Othell{}
+	hostnameFlag    = flag.String("hostname", "", "Public hostname to listen for (required)")
+	backendURLFlag  = flag.String("backend-url", "", "URL of the local backend service (e.g. http://localhost:8080)")
 )
 
 func NATSConnect(opts NATSConnectionOptions) (*nats.Conn, error) {
@@ -128,16 +131,34 @@ func main() {
 
 	slog.Info("Connected to NATS", "url", NATSOptions.URL)
 
+	// Validate required flags
+	if *hostnameFlag == "" {
+		slog.Error("hostname flag is required")
+		os.Exit(1)
+	}
+
 	// Create and start the reverse proxy
 	proxy := h8sreverse.NewReverseProxy(nc)
 
+	proxy.FilterHost = *hostnameFlag
+
+	if *backendURLFlag != "" {
+		u, err := url.Parse(*backendURLFlag)
+		if err != nil {
+			slog.Error("Invalid backend-url", "error", err)
+			os.Exit(1)
+		}
+		proxy.BackendURL = u
+		slog.Info("Configured backend", "url", u.String())
+	}
+
 	ctx := context.Background()
-	if err := proxy.SubscribeAll(ctx); err != nil {
+	if err := proxy.SubscribeForHost(ctx, *hostnameFlag); err != nil {
 		slog.Error("Failed to subscribe", "error", err)
 		os.Exit(1)
 	}
 
-	slog.Info("h8srd (Reverse Daemon) started and subscribed to subjects")
+	slog.Info("h8srd (Reverse Daemon) started", "hostname", *hostnameFlag)
 
 	// Block forever (or until signal)
 	select {}
