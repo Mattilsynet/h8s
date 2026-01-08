@@ -106,6 +106,7 @@ type H8Sproxy struct {
 	InterestOnly    bool
 	InterestTracker H8SInterestTracker
 	WSPool          *WSPool
+	MaxBodySize     int64
 
 	// With this set to true, h8s will not expect a reply. All incoming requests will be publish only.
 	PublishOnly bool
@@ -146,6 +147,7 @@ func NewH8Sproxy(natsConn *nats.Conn, opts ...Option) *H8Sproxy {
 		WSPool:         NewWSPool(),
 		InterestOnly:   false,
 		PublishOnly:    false,
+		MaxBodySize:    32 * 1024 * 1024, // Default 32MB
 		// The OTEL Meter and Tracer by default get a NOOP by default.
 		OTELTracer: otel.GetTracerProvider().Tracer("h8s-proxy"),
 		OTELMeter:  otel.GetMeterProvider().Meter("h8s-proxy"),
@@ -240,6 +242,12 @@ func WithPublishOnly() Option {
 	}
 }
 
+func WithMaxBodySize(size int64) Option {
+	return func(h8s *H8Sproxy) {
+		h8s.MaxBodySize = size
+	}
+}
+
 func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 	ctx := req.Context()
 
@@ -276,6 +284,10 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 
 	// Scheme is not set in request, which is strange, we'll enforce that here.
 	req.URL.Scheme = "http"
+
+	// Enforce MaxBytesReader to prevent DoS via large bodies
+	req.Body = http.MaxBytesReader(res, req.Body, h8s.MaxBodySize)
+
 	msg := httpRequestToNATSMessage(req)
 
 	var (
@@ -393,6 +405,10 @@ func (h8s *H8Sproxy) handleWebSocket(res http.ResponseWriter, req *http.Request)
 		return
 	}
 	defer conn.Close()
+
+	if h8s.MaxBodySize > 0 {
+		conn.SetReadLimit(h8s.MaxBodySize)
+	}
 
 	_, span := h8s.OTELTracer.Start(req.Context(), "websocket-connection")
 	defer span.End()

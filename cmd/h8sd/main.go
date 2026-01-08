@@ -38,6 +38,7 @@ var (
 	otel                 = &othell.Othell{}
 	authorizationKeyFlag = flag.String("authorization-key", "", "Naive authorization key for all endpoints.")
 	publishOnlyFlag      = flag.Bool("publish-only", false, "Enable publish-only mode, expect no reply's everyting will become 200 OK")
+	maxBodySizeFlag      = flag.Int64("max-body-size", 32*1024*1024, "Max size of request body in bytes (default 32MB)")
 )
 
 func NATSConnect(opts NATSConnectionOptions) (*nats.Conn, error) {
@@ -164,6 +165,10 @@ func main() {
 	if *publishOnlyFlag {
 		slog.Info("Running in publish only mode for http requests. All requests will get 200 OK.")
 		executionOptions = append(executionOptions, h8s.WithPublishOnly())
+	}
+
+	if *maxBodySizeFlag > 0 {
+		executionOptions = append(executionOptions, h8s.WithMaxBodySize(*maxBodySizeFlag))
 	}
 
 	h8sproxy := h8s.NewH8Sproxy(
