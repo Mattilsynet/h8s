@@ -9,7 +9,8 @@
 *.dylib
 local/
 *.creds
-./h8sd
+h8sd
+h8srd
 config.yaml
 
 # Test binary, built with `go test -c`
