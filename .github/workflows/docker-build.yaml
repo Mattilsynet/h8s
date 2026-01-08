@@ -15,6 +15,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: [h8sd, h8srd]
 
     steps:
       - name: Checkout source
@@ -48,8 +51,8 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./Dockerfile
+          file: ./Dockerfile.${{ matrix.app }}
           push: true
           tags: |
-            ghcr.io/mattilsynet/h8sd:${{ env.TAG }}
-            ghcr.io/mattilsynet/h8sd:latest
+            ghcr.io/mattilsynet/${{ matrix.app }}:${{ env.TAG }}
+            ghcr.io/mattilsynet/${{ matrix.app }}:latest

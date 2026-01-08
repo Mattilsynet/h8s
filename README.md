@@ -139,6 +139,43 @@ graph TB
 ```
 <!-- end_slide -->
 
+## Diagram 3 - Workloads connected via h8srd (Reverse Daemon)
+
+```mermaid +render
+graph TB 
+    client[Simplified HTTP Client]
+
+    subgraph edge-infrastructure 
+        h8sd[h8sd]
+    end
+
+    subgraph NATS-Infrastructure
+        subgraph Account
+            subject
+            inbox
+            control[h8s.control.ws.conn.*]
+        end
+    end
+
+    subgraph Internal-Network
+        h8srd
+        backend-service[Internal Service<br>:80 or :443]
+    end
+
+    client --> |http,ws| h8sd
+    h8sd --> |pub| subject 
+    h8sd --> |sub| inbox
+
+    h8srd --> |sub| subject
+    h8srd --> |pub| inbox
+    h8srd --> |sub| control
+
+    h8srd --> |http,ws| backend-service
+
+    note[h8srd acts as a bridge,<br>proxying NATS messages<br>to local HTTP/WS services]
+```
+<!-- end_slide -->
+
 ## Subject Mapping of REST and Websockets
 
 ```mermaid +render
@@ -179,3 +216,36 @@ graph TB
 ```
 
 > The sender WIT interface provides a couple of functions: `'get-connections()' and 'get-connections-by-subject(subject)'.`
+
+## Running the Daemons
+
+### h8sd (Ingress Proxy)
+
+`h8sd` is the ingress point that accepts HTTP/WS connections and forwards them to NATS.
+
+```bash
+# Basic usage
+./h8sd --nats-url="nats://localhost:4222"
+
+# With credentials and OpenTelemetry
+./h8sd \
+  --nats-url="nats://demo.nats.io:4222" \
+  --nats-creds="./user.creds" \
+  --otel-enabled=true \
+  --otel-endpoint="localhost:4317"
+```
+
+### h8srd (Reverse Daemon)
+
+`h8srd` runs alongside your backend service, subscribes to NATS subjects, and forwards requests to your local service.
+
+```bash
+# Basic usage
+./h8srd --nats-url="nats://localhost:4222"
+
+# With credentials
+./h8srd \
+  --nats-url="nats://demo.nats.io:4222" \
+  --nats-creds="./user.creds"
+```
+
