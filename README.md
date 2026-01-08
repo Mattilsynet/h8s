@@ -233,6 +233,13 @@ graph TB
   --nats-creds="./user.creds" \
   --otel-enabled=true \
   --otel-endpoint="localhost:4317"
+
+# With security option (Max Body Size, Host Filters, Request Timeout)
+./h8sd \
+  --nats-url="nats://localhost:4222" \
+  --max-body-size=10485760 \
+  --host-filters="example.com,api.example.com" \
+  --request-timeout=5s
 ```
 
 ### h8srd (Reverse Daemon)

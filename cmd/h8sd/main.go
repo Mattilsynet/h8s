@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	h8s "github.com/Mattilsynet/h8s/pkg/h8sproxy"
@@ -39,6 +40,8 @@ var (
 	authorizationKeyFlag = flag.String("authorization-key", "", "Naive authorization key for all endpoints.")
 	publishOnlyFlag      = flag.Bool("publish-only", false, "Enable publish-only mode, expect no reply's everyting will become 200 OK")
 	maxBodySizeFlag      = flag.Int64("max-body-size", 32*1024*1024, "Max size of request body in bytes (default 32MB)")
+	hostFiltersFlag      = flag.String("host-filters", "", "Comma separated list of allowed hosts (e.g. 'example.com,api.example.com')")
+	requestTimeoutFlag   = flag.Duration("request-timeout", 2*time.Second, "Timeout for upstream requests")
 )
 
 func NATSConnect(opts NATSConnectionOptions) (*nats.Conn, error) {
@@ -169,6 +172,20 @@ func main() {
 
 	if *maxBodySizeFlag > 0 {
 		executionOptions = append(executionOptions, h8s.WithMaxBodySize(*maxBodySizeFlag))
+	}
+
+	if *hostFiltersFlag != "" {
+		hosts := strings.Split(*hostFiltersFlag, ",")
+		for _, host := range hosts {
+			if trimmed := strings.TrimSpace(host); trimmed != "" {
+				slog.Info("Adding host filter", "host", trimmed)
+				executionOptions = append(executionOptions, h8s.WithHostFilter(trimmed))
+			}
+		}
+	}
+
+	if *requestTimeoutFlag > 0 {
+		executionOptions = append(executionOptions, h8s.WithRequestTimeout(*requestTimeoutFlag))
 	}
 
 	h8sproxy := h8s.NewH8Sproxy(

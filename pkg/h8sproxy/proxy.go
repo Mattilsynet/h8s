@@ -264,14 +264,45 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 			attribute.String("path", req.URL.Path),
 		))
 
-	// TODO:, check HostFilters
+	// Check HostFilters
+	if len(h8s.HostFilters) > 0 {
+		hostMatch := false
+		for _, filter := range h8s.HostFilters {
+			if strings.EqualFold(req.Host, filter) {
+				hostMatch = true
+				break
+			}
+			// Check X-Forwarded-Host if present
+			if forwardedHost := req.Header.Get("X-Forwarded-Host"); forwardedHost != "" {
+				if strings.EqualFold(forwardedHost, filter) {
+					hostMatch = true
+					break
+				}
+			}
+		}
+
+		if !hostMatch {
+			h8s.NubmerOfDeniedRequests.Add(req.Context(), 1, metric.WithAttributes(attribute.String("reason", "host_filter")))
+			res.Header().Set("Content-Type", "text/plain")
+			res.WriteHeader(http.StatusForbidden)
+			return
+		}
+	}
+
 	if h8s.InterestOnly {
 		if !h8s.InterestTracker.ValidRequest(*req) {
+			h8s.NubmerOfDeniedRequests.Add(req.Context(), 1, metric.WithAttributes(attribute.String("reason", "interest_filter")))
 			res.Header().Set("Content-Type", "text/plain")
 			res.WriteHeader(http.StatusNotFound)
 			return
 		}
 	}
+
+	// Create a child context with the configured timeout
+	ctx, cancel := context.WithTimeout(ctx, h8s.RequestTimeout)
+	defer cancel()
+	// Update request with the new context
+	req = req.WithContext(ctx)
 
 	if strings.EqualFold(req.Header.Get("Connection"), "upgrade") &&
 		strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
@@ -351,9 +382,15 @@ loop:
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					slog.Info("nats receive canceled", "err", err)
 					reason = "ctx_done"
+					if !wroteHeaders {
+						http.Error(res, "Gateway Timeout", http.StatusGatewayTimeout)
+					}
 				} else {
 					slog.Error("nats receive failed", "err", err)
 					reason = "nats_error"
+					if !wroteHeaders {
+						http.Error(res, "Bad Gateway", http.StatusBadGateway)
+					}
 				}
 				return
 			}
