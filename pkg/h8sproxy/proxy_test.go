@@ -19,14 +19,14 @@ import (
 
 func startEmbeddedNATSServer(t *testing.T) *server.Server {
 	opts := &server.Options{
-		Port: 4223,
+		Port: -1, // Dynamic port allocation to avoid conflicts
 	}
 
 	ns, err := server.NewServer(opts)
 	require.NoError(t, err)
 
 	go ns.Start()
-	if !ns.ReadyForConnections(2 * time.Second) {
+	if !ns.ReadyForConnections(5 * time.Second) {
 		t.Fatal("NATS server not ready in time")
 	}
 

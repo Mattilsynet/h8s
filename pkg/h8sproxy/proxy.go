@@ -122,9 +122,19 @@ type H8Sproxy struct {
 	NumberOfIntrests             metric.Int64Gauge   // Number of interests registered
 }
 
+// upgrader handles WebSocket upgrade requests.
+//
+// SECURITY NOTE: CheckOrigin is intentionally permissive. Origin validation
+// is delegated to downstream backend services. The Origin header is forwarded
+// via NATS headers (see handleWebSocket) for backends to validate as needed.
+//
+// WARNING: If downstream services do not validate the Origin header, this
+// opens the system to Cross-Site WebSocket Hijacking (CSWSH) attacks where
+// malicious websites can establish WebSocket connections using a victim's
+// session cookies. Ensure your backend services validate Origin appropriately.
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		// TODO add origin check if necessary
+		// Origin validation delegated to downstream services via NATS headers.
 		return true
 	},
 }

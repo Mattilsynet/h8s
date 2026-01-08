@@ -33,7 +33,7 @@ func (t *fakeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 func startEmbeddedNATS(t *testing.T) *server.Server {
-	opts := &server.Options{Port: 4223}
+	opts := &server.Options{Port: -1} // Dynamic port allocation to avoid conflicts
 	ns, err := server.NewServer(opts)
 	require.NoError(t, err)
 	go ns.Start()
