@@ -143,7 +143,7 @@ graph TB
 
 ```mermaid +render
 graph TB 
-    client[Simplified HTTP Client]
+    client[HTTP Client]
 
     subgraph edge-infrastructure 
         h8sd[h8sd]
@@ -172,7 +172,7 @@ graph TB
 
     h8srd --> |http,ws| backend-service
 
-    note[h8srd acts as a bridge,<br>proxying NATS messages<br>to local HTTP/WS services]
+    note[h8srd acts as a reverse proxy,<br>connecting to local HTTP/WS services<br>via NATS messages]
 ```
 <!-- end_slide -->
 

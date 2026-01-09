@@ -1,0 +1,38 @@
+services:
+  nats:
+    image: nats:latest
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    command: [ "-m", "8222" ]
+
+  # Daemon: The entry point for external traffic
+  # Hardcoded locally to listen on port 8080 inside container
+  h8sd:
+    image: ghcr.io/mattilsynet/h8sd:latest
+    environment:
+      - NATS_URL=nats://nats:4222
+    ports:
+      - "8080:8080"
+    depends_on:
+      - nats
+
+  # Backend: Standard httpbin (listens on port 80 internally)
+  backend:
+    image: kennethreitz/httpbin
+    ports:
+      - "8081:80"
+
+  # Reverse Proxy: Connects backend to NATS
+  h8srd-backend:
+    image: ghcr.io/mattilsynet/h8srd:latest
+    environment:
+      - NATS_URL=nats://nats:4222
+    command:
+      - "-hostname"
+      - "localhost:8080"
+      - "-backend-url"
+      - "http://backend:80"
+    depends_on:
+      - nats
+      - backend
