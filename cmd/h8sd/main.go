@@ -39,7 +39,7 @@ var (
 	otel                 = &othell.Othell{}
 	authorizationKeyFlag = flag.String("authorization-key", "", "Naive authorization key for all endpoints.")
 	publishOnlyFlag      = flag.Bool("publish-only", false, "Enable publish-only mode, expect no reply's everyting will become 200 OK")
-	maxBodySizeFlag      = flag.Int64("max-body-size", 32*1024*1024, "Max size of request body in bytes (default 32MB)")
+	maxBodySizeFlag      = flag.Int64("max-body-size", 2*1024*1024, "Max size of request body in bytes (default 2MB)")
 	hostFiltersFlag      = flag.String("host-filters", "", "Comma separated list of allowed hosts (e.g. 'example.com,api.example.com')")
 	requestTimeoutFlag   = flag.Duration("request-timeout", 2*time.Second, "Timeout for upstream requests")
 )

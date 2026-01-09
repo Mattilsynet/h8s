@@ -154,7 +154,7 @@ func NewH8Sproxy(natsConn *nats.Conn, opts ...Option) *H8Sproxy {
 		WSPool:         NewWSPool(),
 		InterestOnly:   false,
 		PublishOnly:    false,
-		MaxBodySize:    32 * 1024 * 1024, // Default 32MB
+		MaxBodySize:    2 * 1024 * 1024, // Default 2MB
 		// The OTEL Meter and Tracer by default get a NOOP by default.
 		OTELTracer: otel.GetTracerProvider().Tracer("h8s-proxy"),
 		OTELMeter:  otel.GetMeterProvider().Meter("h8s-proxy"),

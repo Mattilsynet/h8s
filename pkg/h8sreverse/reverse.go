@@ -26,13 +26,34 @@ type ReverseProxy struct {
 	wsConns    sync.Map // map[string]*websocket.Conn (key is Reply subject)
 	BackendURL *url.URL // Optional: Forward all requests to this backend
 	FilterHost string   // Optional: Only handle requests for this host (original hostname)
+	QueueGroup string   // Optional: NATS Queue Group for load balancing
+	bufferPool *sync.Pool
 }
 
 // NewReverseProxy creates a proxy with a default HTTP client.
 func NewReverseProxy(nc *nats.Conn) *ReverseProxy {
+	// Tune HTTP Transport for high throughput
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
 	return &ReverseProxy{
-		nats:   nc,
-		client: &http.Client{Timeout: 30 * time.Second},
+		nats: nc,
+		client: &http.Client{
+			Transport: transport,
+			Timeout:   30 * time.Second,
+		},
+		bufferPool: &sync.Pool{
+			New: func() interface{} {
+				// 32KB buffer for reasonably efficient I/O
+				return make([]byte, 32*1024)
+			},
+		},
 	}
 }
 
@@ -53,7 +74,12 @@ func (r *ReverseProxy) SubscribeAll(ctx context.Context) error {
 		"h8s.control.ws.conn.closed",
 	}
 	for _, pat := range patterns {
-		_, err := r.nats.Subscribe(pat, r.handleMsg)
+		var err error
+		if r.QueueGroup != "" {
+			_, err = r.nats.QueueSubscribe(pat, r.QueueGroup, r.handleMsg)
+		} else {
+			_, err = r.nats.Subscribe(pat, r.handleMsg)
+		}
 		if err != nil {
 			return err
 		}
@@ -80,7 +106,12 @@ func (r *ReverseProxy) SubscribeForHost(ctx context.Context, host string) error 
 	}
 
 	for _, pat := range patterns {
-		_, err := r.nats.Subscribe(pat, r.handleMsg)
+		var err error
+		if r.QueueGroup != "" {
+			_, err = r.nats.QueueSubscribe(pat, r.QueueGroup, r.handleMsg)
+		} else {
+			_, err = r.nats.Subscribe(pat, r.handleMsg)
+		}
 		if err != nil {
 			return err
 		}
@@ -190,7 +221,10 @@ func (r *ReverseProxy) handleMsg(msg *nats.Msg) {
 	// Remove Content-Length to ensure h8sproxy streams the response
 	header.Del("Content-Length")
 
-	buf := make([]byte, 4*1024)
+	bufPtr := r.bufferPool.Get().([]byte)
+	defer r.bufferPool.Put(bufPtr)
+	buf := bufPtr
+
 	first := true
 
 	for {

@@ -35,6 +35,7 @@ var (
 	otel            = &othell.Othell{}
 	hostnameFlag    = flag.String("hostname", getEnv("H8SRD_HOSTNAME", ""), "Public hostname to listen for (required)")
 	backendURLFlag  = flag.String("backend-url", getEnv("H8SRD_BACKEND_URL", ""), "URL of the local backend service (e.g. http://localhost:8080)")
+	queueGroupFlag  = flag.String("queue-group", getEnv("H8SRD_QUEUE_GROUP", ""), "NATS Queue Group for load balancing")
 )
 
 func getEnv(key, fallback string) string {
@@ -144,6 +145,10 @@ func main() {
 	proxy := h8sreverse.NewReverseProxy(nc)
 
 	proxy.FilterHost = *hostnameFlag
+	if *queueGroupFlag != "" {
+		proxy.QueueGroup = *queueGroupFlag
+		slog.Info("Using queue group", "group", *queueGroupFlag)
+	}
 
 	if *backendURLFlag != "" {
 		u, err := url.Parse(*backendURLFlag)
