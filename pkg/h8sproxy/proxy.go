@@ -4,8 +4,6 @@ package h8sproxy
 
 import (
 	"bytes"
-	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -150,7 +148,7 @@ var upgrader = websocket.Upgrader{
 func NewH8Sproxy(natsConn *nats.Conn, opts ...Option) *H8Sproxy {
 	proxy := &H8Sproxy{
 		NATSConn:       natsConn,
-		RequestTimeout: time.Second * 2,
+		RequestTimeout: time.Second * 30,
 		WSPool:         NewWSPool(),
 		InterestOnly:   false,
 		PublishOnly:    false,
@@ -335,12 +333,6 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 		}
 	}
 
-	// Create a child context with the configured timeout
-	ctx, cancel := context.WithTimeout(ctx, h8s.RequestTimeout)
-	defer cancel()
-	// Update request with the new context
-	req = req.WithContext(ctx)
-
 	if strings.EqualFold(req.Header.Get("Connection"), "upgrade") &&
 		strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
 		h8s.handleWebSocket(res, req)
@@ -396,24 +388,40 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Use a timer for sliding timeout (reset on data)
+	timer := time.NewTimer(h8s.RequestTimeout)
+	defer timer.Stop()
+
 	flusher, _ := res.(http.Flusher)
 
 loop:
 	for {
 		select {
 		case <-ctx.Done():
+			// Client disconnected
 			slog.Info("http request context canceled", "err", ctx.Err())
 			reason = "ctx_done"
+			return
+
+		case <-timer.C:
+			// Sliding timeout exceeded
+			slog.Info("upstream request timed out (sliding)", "timeout", h8s.RequestTimeout)
+			reason = "timeout"
 			if !wroteHeaders {
-				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-					http.Error(res, "Gateway Timeout", http.StatusGatewayTimeout)
-				} else {
-					http.Error(res, "Bad Gateway", http.StatusBadGateway)
-				}
+				http.Error(res, "Gateway Timeout", http.StatusGatewayTimeout)
 			}
 			return
 
 		case rm := <-respChan:
+			// Reset sliding timer on every message (even empty ones if they are keepalives)
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(h8s.RequestTimeout)
+
 			if !wroteHeaders {
 				copyHeadersOnce(res, rm.Header)
 				wroteHeaders = true
