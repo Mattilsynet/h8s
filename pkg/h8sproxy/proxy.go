@@ -116,6 +116,13 @@ type H8Sproxy struct {
 	OTELTracer trace.Tracer // OpenTelemetry tracer for this connection
 	OTELMeter  metric.Meter // OpenTelemetry meter for this connection
 
+	// ProxyID is a unique identifier for this proxy instance, used for routing replies.
+	ProxyID string
+	// pendingReqs tracks active requests waiting for responses.
+	// Key is the request ID (last part of the reply subject), value is a generic channel for NATS messages.
+	// We use sync.Map for concurrent access.
+	pendingReqs sync.Map
+
 	NumberOfRequests             metric.Int64Counter // Number of requests handled by this proxy
 	NubmerOfDeniedRequests       metric.Int64Counter //
 	NumberOfFailedRequests       metric.Int64Counter // Number of failed requests
@@ -151,6 +158,7 @@ func NewH8Sproxy(natsConn *nats.Conn, opts ...Option) *H8Sproxy {
 		// The OTEL Meter and Tracer by default get a NOOP by default.
 		OTELTracer: otel.GetTracerProvider().Tracer("h8s-proxy"),
 		OTELMeter:  otel.GetMeterProvider().Meter("h8s-proxy"),
+		ProxyID:    nuid.Next(),
 	}
 	for _, opt := range opts {
 		opt(proxy)
@@ -191,7 +199,36 @@ func NewH8Sproxy(natsConn *nats.Conn, opts ...Option) *H8Sproxy {
 	if err != nil {
 		slog.Error("failed to create NumberOfWebsocketConnections metric", "error", err)
 	}
+	// Subscribe to persistent reply subject for this proxy instance
+	replySubject := fmt.Sprintf("%s.%s.*", subjectmapper.InboxPrefix, proxy.ProxyID)
+	_, err = proxy.NATSConn.Subscribe(replySubject, proxy.dispatch)
+	if err != nil {
+		slog.Error("failed to subscribe to reply subject", "subject", replySubject, "error", err)
+		os.Exit(1)
+	}
+	slog.Info("Subscribed to reply subject", "subject", replySubject)
+
 	return proxy
+}
+
+// dispatch handles incoming NATS messages and routes them to the correct request channel.
+func (h8s *H8Sproxy) dispatch(msg *nats.Msg) {
+	// Subject format: _INBOX.h8s.<ProxyID>.<RequestID>
+	parts := strings.Split(msg.Subject, ".")
+	if len(parts) < 4 {
+		return
+	}
+	reqID := parts[len(parts)-1]
+
+	if ch, ok := h8s.pendingReqs.Load(reqID); ok {
+		if respChan, ok := ch.(chan *nats.Msg); ok {
+			select {
+			case respChan <- msg:
+			default:
+				slog.Warn("response channel full, dropping message", "reqID", reqID)
+			}
+		}
+	}
 }
 
 func WithInterestOnly() Option {
@@ -326,7 +363,11 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 		reason       = "completed"
 		once         sync.Once
 		subject      = msg.Header.Get(H8SConnectionCloseSubjectHeaderName)
+		reqID        = nuid.Next()
 	)
+
+	// Set the reply subject to target this specific request ID under the proxy's wildcard subscription
+	msg.Reply = fmt.Sprintf("%v.%v.%v", subjectmapper.InboxPrefix, h8s.ProxyID, reqID)
 
 	defer once.Do(func() {
 		if subject != "" {
@@ -343,22 +384,12 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Subscribe before publishing
-	slog.Info("handler subscribe", "subject", msg.Reply)
-	sub, err := h8s.NATSConn.SubscribeSync(msg.Reply)
-	if err != nil {
-		slog.Error("Unable to subscribe", "subject", msg.Reply)
-		http.Error(res, "Bad gateway", http.StatusBadGateway)
-		return
-	}
-	defer sub.Unsubscribe()
+	// Create and register the response channel
+	respChan := make(chan *nats.Msg, 16) // Buffer to handle bursts
+	h8s.pendingReqs.Store(reqID, respChan)
+	defer h8s.pendingReqs.Delete(reqID)
 
-	// Make sure subscription is active before publishing
-	if err := h8s.NATSConn.Flush(); err != nil {
-		http.Error(res, "NATS Not ready", http.StatusBadGateway)
-		return
-	}
-
+	// Publish the request
 	if err := h8s.NATSConn.PublishMsg(msg); err != nil {
 		slog.Error("Failed to publish request", "error", err)
 		http.Error(res, "Bad gateway", http.StatusBadGateway)
@@ -373,35 +404,20 @@ loop:
 		case <-ctx.Done():
 			slog.Info("http request context canceled", "err", ctx.Err())
 			reason = "ctx_done"
+			if !wroteHeaders {
+				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					http.Error(res, "Gateway Timeout", http.StatusGatewayTimeout)
+				} else {
+					http.Error(res, "Bad Gateway", http.StatusBadGateway)
+				}
+			}
 			return
 
-		default:
-			rm, err := sub.NextMsgWithContext(ctx)
-			if err != nil {
-				// this will also fire if ctx is canceled
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					slog.Info("nats receive canceled", "err", err)
-					reason = "ctx_done"
-					if !wroteHeaders {
-						http.Error(res, "Gateway Timeout", http.StatusGatewayTimeout)
-					}
-				} else {
-					slog.Error("nats receive failed", "err", err)
-					reason = "nats_error"
-					if !wroteHeaders {
-						http.Error(res, "Bad Gateway", http.StatusBadGateway)
-					}
-				}
-				return
-			}
-
+		case rm := <-respChan:
 			if !wroteHeaders {
 				copyHeadersOnce(res, rm.Header)
 				wroteHeaders = true
 			}
-
-			// Removed logging to reduce noise and prevent possible data leakage.
-			// slog.Info("got response data", "header", rm.Header, "data", rm.Data)
 
 			// Responses with header Content-Length set are treated as single responses.
 			if cl := rm.Header.Get("Content-Length"); cl != "" {
@@ -412,7 +428,7 @@ loop:
 			// Handle responses without Content-Length (SSE/Chunked transfer encoding)
 			if len(rm.Data) > 0 {
 				if bytes.Equal(rm.Data, []byte("0\r\n\r\n")) {
-					slog.Info("got terminating chunk")
+					slog.Debug("got terminating chunk")
 					reason = "termination_chunk"
 					break loop
 				}
@@ -425,6 +441,7 @@ loop:
 
 				flusher.Flush()
 			} else {
+				// Empty message usually signals EOF in this protocol
 				break loop
 			}
 		}

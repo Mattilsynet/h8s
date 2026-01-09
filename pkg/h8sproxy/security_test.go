@@ -35,14 +35,14 @@ func TestProxySecurityFeatures(t *testing.T) {
 		// We expect 502 Bad Gateway because NATS is not subscribed, but that means it passed the filter
 		w = httptest.NewRecorder()
 		handler.ServeHTTP(w, req)
-		require.Equal(t, http.StatusBadGateway, w.Code) // passed filter, failed upstream
+		require.Equal(t, http.StatusServiceUnavailable, w.Code) // passed filter, failed upstream (no responders)
 
 		// Case 3: Allowed via X-Forwarded-Host
 		req = httptest.NewRequest("GET", "http://internal-lb/foo", nil)
 		req.Header.Set("X-Forwarded-Host", "allowed.com")
 		w = httptest.NewRecorder()
 		handler.ServeHTTP(w, req)
-		require.Equal(t, http.StatusBadGateway, w.Code) // passed filter
+		require.Equal(t, http.StatusServiceUnavailable, w.Code) // passed filter
 	})
 
 	t.Run("RequestTimeout", func(t *testing.T) {
