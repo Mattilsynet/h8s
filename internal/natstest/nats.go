@@ -10,7 +10,7 @@ import (
 
 func StartEmbeddedNATSServer(t *testing.T) *server.Server {
 	opts := &server.Options{
-		Port: 4223,
+		Port: -1,
 	}
 
 	ns, err := server.NewServer(opts)

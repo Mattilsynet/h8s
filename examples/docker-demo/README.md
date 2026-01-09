@@ -1,12 +1,12 @@
 # H8S Docker Compose Demo
 
 This demo runs the full H8S stack using Docker Compose, pulling `h8sd` and `h8srd` images from GitHub Container Registry (GHCR).
-It uses `mccutchen/go-httpbin` as the backend to demonstrate HTTP, WebSocket, and SSE capabilities.
+It uses `kennethreitz/httpbin` as the backend to demonstrate HTTP, WebSocket, and SSE capabilities.
 
 ## Components
 
 - **nats**: The messaging backbone.
-- **h8sd**: The ingress daemon, exposing port 80.
+- **h8sd**: The ingress daemon, exposing port 8080.
 - **backend**: `kennethreitz/httpbin` (standard httpbin service).
 - **h8srd-backend**: The reverse proxy sidecar that tunnels traffic from NATS to the backend.
 
