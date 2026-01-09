@@ -4,7 +4,7 @@ services:
     ports:
       - "4222:4222"
       - "8222:8222"
-    command: [ "-m", "8222" ]
+    command: ["-m", "8222"]
 
   # Daemon: The entry point for external traffic
   # Hardcoded locally to listen on port 8080 inside container

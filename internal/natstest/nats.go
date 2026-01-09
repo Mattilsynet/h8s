@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func StartEmbeddedNATSServer(t *testing.T) *server.Server {
+func StartEmbeddedNATSServer(t testing.TB) *server.Server {
 	opts := &server.Options{
 		Port: -1,
 	}
