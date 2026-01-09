@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/Mattilsynet/h8s/pkg/h8sreverse"
@@ -27,14 +28,31 @@ type NATSConnectionOptions struct {
 
 var (
 	NATSOptions     NATSConnectionOptions
-	natsURLFlag     = flag.String("nats-url", "", "NATS server URL")
-	natsCredsFlag   = flag.String("nats-creds", "", "Path to NATS credentials file (optional)")
-	otelEnabledFlag = flag.Bool("otel-enabled", false, "Enable OpenTelemetry tracing and metrics")
-	otelEndpoint    = flag.String("otel-endpoint", "", "")
+	natsURLFlag     = flag.String("nats-url", getEnv("NATS_URL", "nats://0.0.0.0:4222"), "NATS server URL")
+	natsCredsFlag   = flag.String("nats-creds", getEnv("NATS_CREDS_PATH", ""), "Path to NATS credentials file (optional)")
+	otelEnabledFlag = flag.Bool("otel-enabled", getEnvBool("OTEL_ENABLED", false), "Enable OpenTelemetry tracing and metrics")
+	otelEndpoint    = flag.String("otel-endpoint", getEnv("OTEL_ENDPOINT", ""), "")
 	otel            = &othell.Othell{}
-	hostnameFlag    = flag.String("hostname", "", "Public hostname to listen for (required)")
-	backendURLFlag  = flag.String("backend-url", "", "URL of the local backend service (e.g. http://localhost:8080)")
+	hostnameFlag    = flag.String("hostname", getEnv("H8SRD_HOSTNAME", ""), "Public hostname to listen for (required)")
+	backendURLFlag  = flag.String("backend-url", getEnv("H8SRD_BACKEND_URL", ""), "URL of the local backend service (e.g. http://localhost:8080)")
 )
+
+func getEnv(key, fallback string) string {
+	if value, ok := os.LookupEnv(key); ok {
+		return value
+	}
+	return fallback
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	if value, ok := os.LookupEnv(key); ok {
+		b, err := strconv.ParseBool(value)
+		if err == nil {
+			return b
+		}
+	}
+	return fallback
+}
 
 func NATSConnect(opts NATSConnectionOptions) (*nats.Conn, error) {
 	natsOpts := []nats.Option{
@@ -63,24 +81,9 @@ func init() {
 
 	flag.Parse()
 
-	// Determine NATS URL
-	url := *natsURLFlag
-	if url == "" {
-		url = os.Getenv("NATS_URL")
-	}
-	if url == "" {
-		url = "nats://0.0.0.0:4222"
-	}
-
-	// Determine NATS Creds Path
-	creds := *natsCredsFlag
-	if creds == "" {
-		creds = os.Getenv("NATS_CREDS_PATH")
-	}
-
 	NATSOptions = NATSConnectionOptions{
-		URL:             url,
-		CredsPath:       creds,
+		URL:             *natsURLFlag,
+		CredsPath:       *natsCredsFlag,
 		Name:            "h8srd",
 		Timeout:         5 * time.Second,
 		ReconnectBuffer: 8 * 1024 * 1024, // 8MB

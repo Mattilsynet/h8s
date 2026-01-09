@@ -10,7 +10,7 @@
 local/
 *.creds
 
-h8srd
+/h8srd
 config.yaml
 
 # Test binary, built with `go test -c`
