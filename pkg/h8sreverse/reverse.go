@@ -216,7 +216,7 @@ func (r *ReverseProxy) handleMsg(msg *nats.Msg) {
 			header.Add(k, vv)
 		}
 	}
-	header.Set("Status", http.StatusText(resp.StatusCode))
+	header.Set("Status", strconv.Itoa(resp.StatusCode))
 	header.Set("Status-Code", strconv.Itoa(resp.StatusCode))
 	// Remove Content-Length to ensure h8sproxy streams the response
 	header.Del("Content-Length")
@@ -272,8 +272,8 @@ func (r *ReverseProxy) publishError(msg *nats.Msg, code int, errStr string) {
 		Data:    []byte(errStr),
 		Header:  nats.Header{},
 	}
+	respMsg.Header.Set("Status", strconv.Itoa(code))
 	respMsg.Header.Set("Status-Code", strconv.Itoa(code))
-	respMsg.Header.Set("Status", http.StatusText(code))
 	r.nats.PublishMsg(respMsg)
 }
 

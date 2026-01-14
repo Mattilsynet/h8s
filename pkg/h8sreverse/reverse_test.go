@@ -67,7 +67,7 @@ func TestReverseProxySubscribeAll(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte("pong"), reply.Data)
 	require.Equal(t, "200", reply.Header.Get("Status-Code"))
-	require.Equal(t, "OK", reply.Header.Get("Status"))
+	require.Equal(t, "200", reply.Header.Get("Status"))
 	require.Equal(t, "test-value", reply.Header.Get("X-Test-Header"))
 
 	req := rp.client.Transport.(*fakeTransport).req
@@ -137,7 +137,7 @@ func TestErrorHandling(t *testing.T) {
 	reply, err := replySub.NextMsgWithContext(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "502", reply.Header.Get("Status-Code"))
-	require.Equal(t, "Bad Gateway", reply.Header.Get("Status"))
+	require.Equal(t, "502", reply.Header.Get("Status"))
 	require.Contains(t, string(reply.Data), io.ErrUnexpectedEOF.Error())
 }
 

@@ -644,7 +644,11 @@ func httpRequestToNATSMessage(req *http.Request) *nats.Msg {
 func copyHeadersOnce(res http.ResponseWriter, h nats.Header) {
 	statusCode := http.StatusOK
 
-	if s := h.Get("Status"); s != "" {
+	if s := h.Get("Status-Code"); s != "" {
+		if v, convErr := strconv.Atoi(strings.TrimSpace(s)); convErr == nil && v >= 100 && v <= 999 {
+			statusCode = v
+		}
+	} else if s := h.Get("Status"); s != "" {
 		if v, convErr := strconv.Atoi(strings.TrimSpace(s)); convErr == nil && v >= 100 && v <= 999 {
 			statusCode = v
 		}
