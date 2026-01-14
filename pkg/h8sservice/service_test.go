@@ -6,15 +6,42 @@ import (
 	"time"
 
 	"github.com/Mattilsynet/h8s/internal/natstest"
+	"github.com/Mattilsynet/h8s/pkg/h8sproxy"
 	"github.com/Mattilsynet/h8s/pkg/subjectmapper"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/micro"
+	"github.com/stretchr/testify/require"
 )
 
 type myTestHandler struct{}
 
 func (myTestHandler) Handle(r micro.Request) {
 	r.Respond([]byte("ok"))
+}
+
+func TestServiceDefaultsInterestPublishSubject(t *testing.T) {
+	ns := natstest.StartEmbeddedNATSServer(t)
+	defer ns.Shutdown()
+
+	nc, err := nats.Connect(ns.ClientURL())
+	require.NoError(t, err)
+	defer nc.Drain()
+
+	client := NewService(nc)
+	client.AddRequestHandler("localhost", "/default", "GET", "http", myTestHandler{})
+
+	sub, err := nc.SubscribeSync(h8sproxy.H8SInterestControlSubject)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	client.ctx = ctx
+	go client.Run()
+
+	_, err = sub.NextMsg(2 * time.Second)
+	require.NoError(t, err)
+
+	cancel()
+	client.Shutdown()
 }
 
 func TestAddRequestServiceAndHandlerInvoke(t *testing.T) {

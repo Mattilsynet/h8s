@@ -144,13 +144,14 @@ func NewService(nc *nats.Conn, opts ...Option) *Service {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	client := &Service{
-		ctx:                  ctx,
-		cancel:               cancel,
-		natsConn:             nc,
-		subjectPrefix:        subjectmapper.SubjectPrefix,
-		requestServices:      make(map[string]micro.Config),
-		websocketServices:    make(map[string]*WebsocketHandler),
-		websocketConnections: NewWebSocketConnections(),
+		ctx:                    ctx,
+		cancel:                 cancel,
+		natsConn:               nc,
+		subjectPrefix:          subjectmapper.SubjectPrefix,
+		InterestPublishSubject: h8sproxy.H8SInterestControlSubject,
+		requestServices:        make(map[string]micro.Config),
+		websocketServices:      make(map[string]*WebsocketHandler),
+		websocketConnections:   NewWebSocketConnections(),
 	}
 
 	for _, opt := range opts {
