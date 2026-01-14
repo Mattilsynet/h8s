@@ -114,10 +114,10 @@ func (it *InterestTracker) ValidRequest(req http.Request) bool {
 		req.Method,
 	}
 	if interest, exists := it.Interests.InterestMap[tempInterest.Id()]; exists && interest != nil {
-		slog.Error("untable to find interest for request", "interest", interest, "exists", exists)
-		return false
+		return true
 	}
-	return true
+	slog.Debug("no registered interest for request", "interest", tempInterest)
+	return false
 }
 
 func (i *Interests) Add(interest *Interest) {
@@ -133,13 +133,15 @@ func (i *Interests) RunEvictions() {
 		slog.Debug("Current interests", "interests", i.InterestMap)
 		time.Sleep(5 * time.Second) // Initial delay before starting evictions
 
+		now := time.Now()
+		i.Lock()
 		for id, ts := range i.InterestSeen {
-			now := time.Now()
-			dur := now.Sub(ts)
-			if dur > 1*time.Minute {
-				i.evict(id)
+			if now.Sub(ts) > 1*time.Minute {
+				delete(i.InterestMap, id)
+				delete(i.InterestSeen, id)
 			}
 		}
+		i.Unlock()
 	}
 }
 

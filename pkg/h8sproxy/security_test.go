@@ -1,11 +1,13 @@
 package h8sproxy
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/Mattilsynet/h8s/pkg/tracker"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
 )
@@ -75,4 +77,52 @@ func TestProxySecurityFeatures(t *testing.T) {
 		// Let's assert what we WANT (504) and see it fail.
 		require.Equal(t, http.StatusGatewayTimeout, w.Code)
 	})
+}
+
+func TestInterestOnlyMode_AllowsRegisteredInterest(t *testing.T) {
+	ns := startEmbeddedNATSServer(t)
+	defer ns.Shutdown()
+
+	nc, err := nats.Connect(ns.ClientURL())
+	require.NoError(t, err)
+	defer nc.Drain()
+
+	interestSubject := "h8s.control.interest"
+	interestTracker := tracker.NewInterestTracker(nc, tracker.WithInterestSubject(interestSubject))
+	require.NoError(t, interestTracker.Run())
+
+	proxy := NewH8Sproxy(nc, WithInterestOnly(), WithInterestTracker(interestTracker))
+	handler := http.HandlerFunc(proxy.Handler)
+
+	req := httptest.NewRequest(http.MethodGet, "http://allowed.com/ping", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	require.Equal(t, http.StatusNotFound, w.Code)
+
+	interest := tracker.Interest{
+		Host:   "allowed.com",
+		Path:   "/ping",
+		Method: "GET",
+	}
+	data, err := json.Marshal(interest)
+	require.NoError(t, err)
+	require.NoError(t, nc.Publish(interestSubject, data))
+	require.NoError(t, nc.FlushTimeout(1*time.Second))
+
+	require.Eventually(t, func() bool {
+		interestTracker.Interests.RLock()
+		defer interestTracker.Interests.RUnlock()
+		_, ok := interestTracker.Interests.InterestMap[interest.Id()]
+		return ok
+	}, time.Second, 10*time.Millisecond)
+
+	req = httptest.NewRequest(http.MethodGet, "http://allowed.com/ping", nil)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	require.NotEqual(t, http.StatusNotFound, w.Code)
+
+	req = httptest.NewRequest(http.MethodGet, "http://denied.com/ping", nil)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	require.Equal(t, http.StatusNotFound, w.Code)
 }
