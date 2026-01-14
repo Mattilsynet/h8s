@@ -42,7 +42,7 @@ var (
 	maxBodySizeFlag      = flag.Int64("max-body-size", 2*1024*1024, "Max size of request body in bytes (default 2MB)")
 	hostFiltersFlag      = flag.String("host-filters", "", "Comma separated list of allowed hosts (e.g. 'example.com,api.example.com')")
 	requestTimeoutFlag   = flag.Duration("request-timeout", 30*time.Second, "Timeout for upstream requests")
-	allowedOriginsFlag   = flag.String("allowed-origins", "", "Comma separated list of allowed WebSocket Origin values")
+	allowedOriginsFlag   = flag.String("allowed-origins", "", "Comma separated list of allowed WebSocket Origin values (default allows all origins)")
 )
 
 func NATSConnect(opts NATSConnectionOptions) (*nats.Conn, error) {
