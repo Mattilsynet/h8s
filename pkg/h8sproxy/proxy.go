@@ -546,7 +546,7 @@ func (h8s *H8Sproxy) handleWebSocket(res http.ResponseWriter, req *http.Request)
 		Send:             make(chan []byte, 256),
 		PublishSubject:   sm.WebSocketPublishSubject(),
 		SubscribeSubject: subscribeSubject,
-		Headers:          req.Header.Clone(),
+		Headers:          req.Header,
 	}
 	defer close(wsConn.Send)
 
