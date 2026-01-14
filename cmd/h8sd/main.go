@@ -42,6 +42,7 @@ var (
 	maxBodySizeFlag      = flag.Int64("max-body-size", 2*1024*1024, "Max size of request body in bytes (default 2MB)")
 	hostFiltersFlag      = flag.String("host-filters", "", "Comma separated list of allowed hosts (e.g. 'example.com,api.example.com')")
 	requestTimeoutFlag   = flag.Duration("request-timeout", 30*time.Second, "Timeout for upstream requests")
+	allowedOriginsFlag   = flag.String("allowed-origins", "", "Comma separated list of allowed WebSocket Origin values")
 )
 
 func NATSConnect(opts NATSConnectionOptions) (*nats.Conn, error) {
@@ -181,6 +182,20 @@ func main() {
 				slog.Info("Adding host filter", "host", trimmed)
 				executionOptions = append(executionOptions, h8s.WithHostFilter(trimmed))
 			}
+		}
+	}
+
+	if *allowedOriginsFlag != "" {
+		origins := strings.Split(*allowedOriginsFlag, ",")
+		var allowed []string
+		for _, origin := range origins {
+			if trimmed := strings.TrimSpace(origin); trimmed != "" {
+				allowed = append(allowed, trimmed)
+			}
+		}
+		if len(allowed) > 0 {
+			slog.Info("Adding allowed WebSocket origins", "count", len(allowed))
+			executionOptions = append(executionOptions, h8s.WithAllowedOrigins(allowed...))
 		}
 	}
 

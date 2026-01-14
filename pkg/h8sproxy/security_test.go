@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Mattilsynet/h8s/pkg/tracker"
+	"github.com/gorilla/websocket"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
 )
@@ -125,4 +127,45 @@ func TestInterestOnlyMode_AllowsRegisteredInterest(t *testing.T) {
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	require.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestWebSocketOriginFilter(t *testing.T) {
+	ns := startEmbeddedNATSServer(t)
+	defer ns.Shutdown()
+
+	nc, err := nats.Connect(ns.ClientURL())
+	require.NoError(t, err)
+	defer nc.Drain()
+
+	t.Run("DefaultAllowsAll", func(t *testing.T) {
+		proxy := NewH8Sproxy(nc)
+		srv := httptest.NewServer(http.HandlerFunc(proxy.handleWebSocket))
+		t.Cleanup(srv.Close)
+
+		wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/test"
+		dialer := websocket.Dialer{Proxy: http.ProxyFromEnvironment}
+		headers := http.Header{"Origin": []string{"https://evil.example.com"}}
+
+		conn, _, err := dialer.Dial(wsURL, headers)
+		require.NoError(t, err)
+		require.NoError(t, conn.Close())
+	})
+
+	t.Run("EnforcedAllowsOnlyConfiguredOrigins", func(t *testing.T) {
+		proxy := NewH8Sproxy(nc, WithAllowedOrigins("https://good.example.com"))
+		srv := httptest.NewServer(http.HandlerFunc(proxy.handleWebSocket))
+		t.Cleanup(srv.Close)
+
+		wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/test"
+		dialer := websocket.Dialer{Proxy: http.ProxyFromEnvironment}
+
+		headers := http.Header{"Origin": []string{"https://good.example.com"}}
+		conn, _, err := dialer.Dial(wsURL, headers)
+		require.NoError(t, err)
+		require.NoError(t, conn.Close())
+
+		headers = http.Header{"Origin": []string{"https://evil.example.com"}}
+		_, _, err = dialer.Dial(wsURL, headers)
+		require.Error(t, err)
+	})
 }

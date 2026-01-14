@@ -110,12 +110,16 @@ type H8Sproxy struct {
 	PublishOnly bool
 	// NaiveAuthorizationKey when set will go a "naive" authorization against key on all endpoints.
 	NaiveAuthorizationKey string
+	// AllowedOrigins configures optional WebSocket origin allowlist.
+	AllowedOrigins []string
 
 	OTELTracer trace.Tracer // OpenTelemetry tracer for this connection
 	OTELMeter  metric.Meter // OpenTelemetry meter for this connection
 
 	// ProxyID is a unique identifier for this proxy instance, used for routing replies.
 	ProxyID string
+	// upgrader handles WebSocket upgrade requests.
+	upgrader websocket.Upgrader
 	// pendingReqs tracks active requests waiting for responses.
 	// Key is the request ID (last part of the reply subject), value is a generic channel for NATS messages.
 	// We use sync.Map for concurrent access.
@@ -126,23 +130,6 @@ type H8Sproxy struct {
 	NumberOfFailedRequests       metric.Int64Counter // Number of failed requests
 	NumberOfWebsocketConnections metric.Int64Gauge   // Number of WebSocket connections established
 	NumberOfIntrests             metric.Int64Gauge   // Number of interests registered
-}
-
-// upgrader handles WebSocket upgrade requests.
-//
-// SECURITY NOTE: CheckOrigin is intentionally permissive. Origin validation
-// is delegated to downstream backend services. The Origin header is forwarded
-// via NATS headers (see handleWebSocket) for backends to validate as needed.
-//
-// WARNING: If downstream services do not validate the Origin header, this
-// opens the system to Cross-Site WebSocket Hijacking (CSWSH) attacks where
-// malicious websites can establish WebSocket connections using a victim's
-// session cookies. Ensure your backend services validate Origin appropriately.
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		// Origin validation delegated to downstream services via NATS headers.
-		return true
-	},
 }
 
 func NewH8Sproxy(natsConn *nats.Conn, opts ...Option) *H8Sproxy {
@@ -161,6 +148,24 @@ func NewH8Sproxy(natsConn *nats.Conn, opts ...Option) *H8Sproxy {
 	for _, opt := range opts {
 		opt(proxy)
 	}
+
+	// SECURITY NOTE: CheckOrigin is permissive unless AllowedOrigins is set.
+	// Origin validation can be enforced by configuring AllowedOrigins.
+	proxy.upgrader = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			if len(proxy.AllowedOrigins) == 0 {
+				return true
+			}
+			origin := r.Header.Get("Origin")
+			for _, allowed := range proxy.AllowedOrigins {
+				if strings.EqualFold(origin, allowed) {
+					return true
+				}
+			}
+			return false
+		},
+	}
+
 	if proxy.InterestOnly {
 		slog.Info("Starting with interest mode only")
 		if err := proxy.InterestTracker.Run(); err != nil {
@@ -280,6 +285,12 @@ func WithPublishOnly() Option {
 func WithMaxBodySize(size int64) Option {
 	return func(h8s *H8Sproxy) {
 		h8s.MaxBodySize = size
+	}
+}
+
+func WithAllowedOrigins(origins ...string) Option {
+	return func(h8s *H8Sproxy) {
+		h8s.AllowedOrigins = append(h8s.AllowedOrigins, origins...)
 	}
 }
 
@@ -461,7 +472,7 @@ func (h8s *H8Sproxy) Dummy(res http.ResponseWriter, req *http.Request) {
 }
 
 func (h8s *H8Sproxy) handleWebSocket(res http.ResponseWriter, req *http.Request) {
-	conn, err := upgrader.Upgrade(res, req, nil)
+	conn, err := h8s.upgrader.Upgrade(res, req, nil)
 	if err != nil {
 		slog.Error("WebSocket upgrade failed", "error", err)
 		return
