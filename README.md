@@ -205,3 +205,29 @@ go test -bench=. -benchmem -v ./pkg/h8sproxy
 
 These benchmarks confirm that `h8sd` adds minimal overhead, with the primary bottleneck pushed to the downstream backend service.
 
+## Code Coverage
+
+To generate a coverage report:
+
+```bash
+go test ./... -coverprofile=coverage.out
+go tool cover -func=coverage.out
+go tool cover -html=coverage.out -o coverage.html
+```
+
+This writes `coverage.html` for a visual report.
+
+## Performance Profiling (pprof)
+
+To capture CPU and memory profiles during benchmarks:
+
+```bash
+go test ./pkg/h8sproxy -bench=. -benchmem -cpuprofile=cpu.out -memprofile=mem.out
+go tool pprof -http=:8080 cpu.out
+go tool pprof -http=:8081 mem.out
+```
+
+This opens an interactive web UI for profiling.
+
+Note: `go tool pprof` uses Graphviz for some visualizations, so install `graphviz` for full functionality.
+
