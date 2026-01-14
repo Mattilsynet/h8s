@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -315,6 +316,22 @@ func WithAllowedOrigins(origins ...string) Option {
 	}
 }
 
+func normalizeHost(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	trimmed := strings.TrimSpace(raw)
+	if comma := strings.Index(trimmed, ","); comma != -1 {
+		trimmed = strings.TrimSpace(trimmed[:comma])
+	}
+	if host, _, err := net.SplitHostPort(trimmed); err == nil {
+		return host
+	}
+	trimmed = strings.TrimPrefix(trimmed, "[")
+	trimmed = strings.TrimSuffix(trimmed, "]")
+	return trimmed
+}
+
 func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 	ctx := req.Context()
 
@@ -334,17 +351,24 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 	// Check HostFilters
 	if len(h8s.HostFilters) > 0 {
 		hostMatch := false
+		requestHost := req.URL.Hostname()
+		if requestHost == "" {
+			requestHost = normalizeHost(req.Host)
+		}
+		forwardedHost := normalizeHost(req.Header.Get("X-Forwarded-Host"))
 		for _, filter := range h8s.HostFilters {
-			if strings.EqualFold(req.Host, filter) {
+			normalizedFilter := normalizeHost(filter)
+			if normalizedFilter == "" {
+				continue
+			}
+			if strings.EqualFold(requestHost, normalizedFilter) {
 				hostMatch = true
 				break
 			}
 			// Check X-Forwarded-Host if present
-			if forwardedHost := req.Header.Get("X-Forwarded-Host"); forwardedHost != "" {
-				if strings.EqualFold(forwardedHost, filter) {
-					hostMatch = true
-					break
-				}
+			if forwardedHost != "" && strings.EqualFold(forwardedHost, normalizedFilter) {
+				hostMatch = true
+				break
 			}
 		}
 

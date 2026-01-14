@@ -47,6 +47,27 @@ func TestProxySecurityFeatures(t *testing.T) {
 		w = httptest.NewRecorder()
 		handler.ServeHTTP(w, req)
 		require.Equal(t, http.StatusServiceUnavailable, w.Code) // passed filter
+
+		// Case 4: Allowed Host with port
+		req = httptest.NewRequest("GET", "http://allowed.com:8443/foo", nil)
+		req.Host = "allowed.com:8443"
+		w = httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		require.Equal(t, http.StatusServiceUnavailable, w.Code) // passed filter
+
+		// Case 5: Allowed via X-Forwarded-Host with port
+		req = httptest.NewRequest("GET", "http://internal-lb/foo", nil)
+		req.Header.Set("X-Forwarded-Host", "allowed.com:8443")
+		w = httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		require.Equal(t, http.StatusServiceUnavailable, w.Code) // passed filter
+
+		// Case 6: Denied Host with port
+		req = httptest.NewRequest("GET", "http://denied.com:8443/foo", nil)
+		req.Host = "denied.com:8443"
+		w = httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		require.Equal(t, http.StatusForbidden, w.Code)
 	})
 
 	t.Run("RequestTimeout", func(t *testing.T) {
