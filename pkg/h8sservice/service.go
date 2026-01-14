@@ -250,7 +250,7 @@ func (c *Service) Run() {
 
 			}
 
-			time.Sleep(5 * time.Second) // Publish interest every 30 seconds
+			time.Sleep(5 * time.Second) // Publish interest every 5 seconds
 		}
 	}()
 
