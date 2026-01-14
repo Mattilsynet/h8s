@@ -492,6 +492,7 @@ func (h8s *H8Sproxy) handleWebSocket(res http.ResponseWriter, req *http.Request)
 		SubscribeSubject: subscribeSubject,
 		Headers:          req.Header.Clone(),
 	}
+	defer close(wsConn.Send)
 
 	// If the connection is not in the pool, do a handshake publish with 0 bytes.
 	if h8s.WSPool.Get(secKey) == nil {
@@ -524,6 +525,7 @@ func (h8s *H8Sproxy) handleWebSocket(res http.ResponseWriter, req *http.Request)
 			if err != nil {
 				slog.Warn("WebSocket write failed", "error", err)
 				h8s.cmConnectionClosed(wsConn.Headers.Get("Sec-WebSocket-Key"))
+				_ = wsConn.Conn.Close()
 				return
 			}
 		}
