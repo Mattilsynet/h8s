@@ -162,13 +162,16 @@ graph TB
   --otel-enabled=true \
   --otel-endpoint="localhost:4317"
 
-# With security option (Max Body Size, Host Filters, Request Timeout)
+# With security option (Max Body Size, Host Filters, Request Timeout, Allowed Origins)
 ./h8sd \
   --nats-url="nats://localhost:4222" \
   --max-body-size=10485760 \
   --host-filters="example.com,api.example.com" \
+  --allowed-origins="https://app.example.com,https://admin.example.com" \
   --request-timeout=5s
 ```
+
+`--allowed-origins` is optional; if omitted, WebSocket origins are not restricted.
 
 ### h8srd (Reverse Daemon)
 
