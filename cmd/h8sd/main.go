@@ -143,7 +143,7 @@ func main() {
 
 	if *trackInterestFlag {
 		var itOptions []tracker.InterestTrackerOption
-		itOptions = append(itOptions, tracker.WithInterestSubject(h8s.H8SInterestControlSubject+".interest"))
+		itOptions = append(itOptions, tracker.WithInterestSubject(h8s.H8SInterestControlSubject))
 		if *otelEnabledFlag {
 			itOptions = append(itOptions, tracker.WithOTELMeter(otel.Meter))
 		}

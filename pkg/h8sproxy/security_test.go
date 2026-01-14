@@ -169,3 +169,36 @@ func TestWebSocketOriginFilter(t *testing.T) {
 		require.Error(t, err)
 	})
 }
+
+func TestInterestSubjectAlignment(t *testing.T) {
+	ns := startEmbeddedNATSServer(t)
+	defer ns.Shutdown()
+
+	nc, err := nats.Connect(ns.ClientURL())
+	require.NoError(t, err)
+	defer nc.Drain()
+
+	interestTracker := tracker.NewInterestTracker(nc, tracker.WithInterestSubject(H8SInterestControlSubject))
+	require.NoError(t, interestTracker.Run())
+
+	proxy := NewH8Sproxy(nc, WithInterestOnly(), WithInterestTracker(interestTracker))
+	handler := http.HandlerFunc(proxy.Handler)
+
+	interest := tracker.Interest{Host: "aligned.com", Path: "/ping", Method: "GET"}
+	payload, err := json.Marshal(interest)
+	require.NoError(t, err)
+	require.NoError(t, nc.Publish(H8SInterestControlSubject, payload))
+	require.NoError(t, nc.FlushTimeout(1*time.Second))
+
+	require.Eventually(t, func() bool {
+		interestTracker.Interests.RLock()
+		defer interestTracker.Interests.RUnlock()
+		_, ok := interestTracker.Interests.InterestMap[interest.Id()]
+		return ok
+	}, time.Second, 10*time.Millisecond)
+
+	req := httptest.NewRequest(http.MethodGet, "http://aligned.com/ping", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	require.NotEqual(t, http.StatusNotFound, w.Code)
+}
