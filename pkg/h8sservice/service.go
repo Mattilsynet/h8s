@@ -109,8 +109,10 @@ func (c *ServiceWebsocketConnections) GetConnectionsBySubject(subject string) []
 
 // Service is a server-client for the h8s proxy
 type Service struct {
-	ctx                    context.Context
-	wg                     sync.WaitGroup
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+
 	natsConn               *nats.Conn
 	subjectPrefix          string
 	InterestPublishSubject string
@@ -139,8 +141,11 @@ func WithInterestPublishSubject(subject string) Option {
 
 // NewService creates a new h8s server
 func NewService(nc *nats.Conn, opts ...Option) *Service {
+	ctx, cancel := context.WithCancel(context.Background())
+
 	client := &Service{
-		ctx:                  context.Background(),
+		ctx:                  ctx,
+		cancel:               cancel,
 		natsConn:             nc,
 		subjectPrefix:        subjectmapper.SubjectPrefix,
 		requestServices:      make(map[string]micro.Config),
@@ -164,7 +169,7 @@ func (c *Service) Run() {
 		service, err := micro.AddService(c.natsConn, config)
 		if err != nil {
 			slog.Error("unable to add request service", "error", err, "name", config.Name, "subject", config.Endpoint.Subject)
-			c.wg.Done()
+			continue
 		}
 		c.requestReplyServices = append(c.requestReplyServices, service)
 		slog.Info("added request service", "name", config.Name, "subject", config.Endpoint.Subject)
@@ -181,6 +186,7 @@ func (c *Service) Run() {
 	c.wg.Add(2)
 	// Listen for websocket connection events
 	go func() {
+		defer c.wg.Done()
 		if _, err := c.natsConn.Subscribe(
 			h8sproxy.H8SControlWebsocketAll,
 			func(msg *nats.Msg) {
@@ -198,11 +204,19 @@ func (c *Service) Run() {
 				"error", err,
 				"subject", h8sproxy.H8SControlWebsocketAll)
 		}
+		<-c.ctx.Done()
 	}()
 
 	// Publish interests periodically
 	go func() {
+		defer c.wg.Done()
 		for {
+			select {
+			case <-c.ctx.Done():
+				return
+			default:
+			}
+
 			for _, config := range c.requestServices {
 				interest := tracker.Interest{
 					Host:   config.Metadata["host"],
@@ -245,7 +259,6 @@ func (c *Service) Run() {
 		for _, service := range c.requestReplyServices {
 			service.Stop()
 		}
-		c.wg.Done()
 	}()
 }
 
@@ -288,7 +301,9 @@ func (c *Service) RegisterWebsocketHandler(handler *WebsocketHandler) {
 
 func (c *Service) Shutdown() {
 	slog.Info("shutting down service")
-	c.ctx.Done()
+	if c.cancel != nil {
+		c.cancel()
+	}
 	c.wg.Wait()
 	slog.Info("service shutdown complete")
 }
