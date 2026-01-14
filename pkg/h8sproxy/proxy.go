@@ -126,10 +126,10 @@ type H8Sproxy struct {
 	pendingReqs sync.Map
 
 	NumberOfRequests             metric.Int64Counter // Number of requests handled by this proxy
-	NubmerOfDeniedRequests       metric.Int64Counter //
+	NumberOfDeniedRequests       metric.Int64Counter //
 	NumberOfFailedRequests       metric.Int64Counter // Number of failed requests
 	NumberOfWebsocketConnections metric.Int64Gauge   // Number of WebSocket connections established
-	NumberOfIntrests             metric.Int64Gauge   // Number of interests registered
+	NumberOfInterests            metric.Int64Gauge   // Number of interests registered
 }
 
 func NewH8Sproxy(natsConn *nats.Conn, opts ...Option) *H8Sproxy {
@@ -182,7 +182,28 @@ func NewH8Sproxy(natsConn *nats.Conn, opts ...Option) *H8Sproxy {
 		slog.Error("failed to create NumberOfRequests metric", "error", err)
 	}
 
-	proxy.NubmerOfDeniedRequests, err = proxy.OTELMeter.Int64Counter(
+	proxy.NumberOfDeniedRequests, err = proxy.OTELMeter.Int64Counter(
+		"h8s_number_of_denied_requests",
+		metric.WithDescription("Counts the number of denied requests either by hots filter or interest filter."))
+	if err != nil {
+		slog.Error("failed to create NumberOfRequests metric", "error", err)
+	}
+
+	proxy.NumberOfFailedRequests, err = proxy.OTELMeter.Int64Counter(
+		"h8s_number_of_failed_requests",
+		metric.WithDescription("Counts the requests that failed without a specific reason."))
+	if err != nil {
+		slog.Error("failed to create NumberOfFailedRequests metric", "error", err)
+	}
+
+	proxy.NumberOfWebsocketConnections, err = proxy.OTELMeter.Int64Gauge(
+		"h8s_active_websocket_connections",
+		metric.WithDescription("Counts the requests that does a websocket upgrade and becomes a websocket connection."))
+	if err != nil {
+		slog.Error("failed to create NumberOfWebsocketConnections metric", "error", err)
+	}
+
+	proxy.NumberOfDeniedRequests, err = proxy.OTELMeter.Int64Counter(
 		"h8s_number_of_denied_requests",
 		metric.WithDescription("Counts the number of denied requests either by hots filter or interest filter."))
 	if err != nil {
@@ -328,7 +349,7 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 		}
 
 		if !hostMatch {
-			h8s.NubmerOfDeniedRequests.Add(req.Context(), 1, metric.WithAttributes(attribute.String("reason", "host_filter")))
+			h8s.NumberOfDeniedRequests.Add(req.Context(), 1, metric.WithAttributes(attribute.String("reason", "host_filter")))
 			res.Header().Set("Content-Type", "text/plain")
 			res.WriteHeader(http.StatusForbidden)
 			return
@@ -337,7 +358,7 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 
 	if h8s.InterestOnly {
 		if !h8s.InterestTracker.ValidRequest(*req) {
-			h8s.NubmerOfDeniedRequests.Add(req.Context(), 1, metric.WithAttributes(attribute.String("reason", "interest_filter")))
+			h8s.NumberOfDeniedRequests.Add(req.Context(), 1, metric.WithAttributes(attribute.String("reason", "interest_filter")))
 			res.Header().Set("Content-Type", "text/plain")
 			res.WriteHeader(http.StatusNotFound)
 			return
