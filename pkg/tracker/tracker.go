@@ -130,7 +130,9 @@ func (i *Interests) Add(interest *Interest) {
 
 func (i *Interests) RunEvictions() {
 	for {
+		i.RLock()
 		slog.Debug("Current interests", "interests", i.InterestMap)
+		i.RUnlock()
 		time.Sleep(5 * time.Second) // Initial delay before starting evictions
 
 		now := time.Now()
