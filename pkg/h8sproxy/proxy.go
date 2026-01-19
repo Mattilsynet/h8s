@@ -187,28 +187,7 @@ func NewH8Sproxy(natsConn *nats.Conn, opts ...Option) *H8Sproxy {
 		"h8s_number_of_denied_requests",
 		metric.WithDescription("Counts the number of denied requests either by hots filter or interest filter."))
 	if err != nil {
-		slog.Error("failed to create NumberOfRequests metric", "error", err)
-	}
-
-	proxy.NumberOfFailedRequests, err = proxy.OTELMeter.Int64Counter(
-		"h8s_number_of_failed_requests",
-		metric.WithDescription("Counts the requests that failed without a specific reason."))
-	if err != nil {
-		slog.Error("failed to create NumberOfFailedRequests metric", "error", err)
-	}
-
-	proxy.NumberOfWebsocketConnections, err = proxy.OTELMeter.Int64Gauge(
-		"h8s_active_websocket_connections",
-		metric.WithDescription("Counts the requests that does a websocket upgrade and becomes a websocket connection."))
-	if err != nil {
-		slog.Error("failed to create NumberOfWebsocketConnections metric", "error", err)
-	}
-
-	proxy.NumberOfDeniedRequests, err = proxy.OTELMeter.Int64Counter(
-		"h8s_number_of_denied_requests",
-		metric.WithDescription("Counts the number of denied requests either by hots filter or interest filter."))
-	if err != nil {
-		slog.Error("failed to create NumberOfRequests metric", "error", err)
+		slog.Error("failed to create NumberOfDeniedRequests metric", "error", err)
 	}
 
 	proxy.NumberOfFailedRequests, err = proxy.OTELMeter.Int64Counter(
