@@ -4,6 +4,7 @@ package h8sproxy
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"fmt"
 	"io"
 	"log/slog"
@@ -315,7 +316,7 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 	ctx := req.Context()
 
 	if h8s.NaiveAuthorizationKey != "" {
-		if req.Header.Get("Authorization") != h8s.NaiveAuthorizationKey {
+		if subtle.ConstantTimeCompare([]byte(req.Header.Get("Authorization")), []byte(h8s.NaiveAuthorizationKey)) != 1 {
 			res.Header().Set("Content-Type", "text/plain")
 			res.WriteHeader(http.StatusForbidden)
 			return

@@ -161,9 +161,15 @@ func main() {
 		executionOptions = append(executionOptions, h8s.WithOTELTracer(otel.Tracer))
 	}
 
-	if len(*authorizationKeyFlag) > 0 {
+	// Determine Authorization Key
+	authKey := *authorizationKeyFlag
+	if authKey == "" {
+		authKey = os.Getenv("H8S_AUTHORIZATION_KEY")
+	}
+
+	if len(authKey) > 0 {
 		slog.Info("Naive authorization mode enabled")
-		executionOptions = append(executionOptions, h8s.WithNaiveAuthorizationKey(*authorizationKeyFlag))
+		executionOptions = append(executionOptions, h8s.WithNaiveAuthorizationKey(authKey))
 	}
 
 	if *publishOnlyFlag {
