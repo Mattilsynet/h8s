@@ -24,6 +24,7 @@ type ReverseProxy struct {
 	nats       *nats.Conn
 	client     *http.Client
 	wsConns    sync.Map // map[string]*websocket.Conn (key is Reply subject)
+	activeSubs sync.Map // map[host][]*nats.Subscription
 	Resolver   BackendResolver
 	FilterHost string // Optional: Only handle requests for this host (original hostname)
 	QueueGroup string // Optional: NATS Queue Group for load balancing
@@ -105,18 +106,55 @@ func (r *ReverseProxy) SubscribeForHost(ctx context.Context, host string) error 
 		"h8s.control.ws.conn.closed",
 	}
 
+	var subs []*nats.Subscription
 	for _, pat := range patterns {
+		var sub *nats.Subscription
 		var err error
 		if r.QueueGroup != "" {
-			_, err = r.nats.QueueSubscribe(pat, r.QueueGroup, r.handleMsg)
+			sub, err = r.nats.QueueSubscribe(pat, r.QueueGroup, r.handleMsg)
 		} else {
-			_, err = r.nats.Subscribe(pat, r.handleMsg)
+			sub, err = r.nats.Subscribe(pat, r.handleMsg)
 		}
 		if err != nil {
+			// Cleanup any successful subscriptions on failure
+			for _, s := range subs {
+				s.Unsubscribe()
+			}
 			return err
 		}
+		subs = append(subs, sub)
 	}
+
+	// Store subscriptions for later cleanup
+	// We append to existing subscriptions if any (though typically we expect one call per host)
+	if existing, ok := r.activeSubs.Load(host); ok {
+		current := existing.([]*nats.Subscription)
+		r.activeSubs.Store(host, append(current, subs...))
+	} else {
+		r.activeSubs.Store(host, subs)
+	}
+
 	return nil
+}
+
+// UnsubscribeForHost removes subscriptions for a given hostname.
+func (r *ReverseProxy) UnsubscribeForHost(host string) error {
+	val, ok := r.activeSubs.Load(host)
+	if !ok {
+		return nil
+	}
+
+	subs := val.([]*nats.Subscription)
+	var lastErr error
+	for _, sub := range subs {
+		if err := sub.Unsubscribe(); err != nil {
+			slog.Error("Failed to unsubscribe", "host", host, "subject", sub.Subject, "error", err)
+			lastErr = err
+		}
+	}
+
+	r.activeSubs.Delete(host)
+	return lastErr
 }
 
 func (r *ReverseProxy) handleMsg(msg *nats.Msg) {
@@ -178,65 +216,30 @@ func (r *ReverseProxy) handleMsg(msg *nats.Msg) {
 				return
 			}
 		}
-	} else if r.Resolver != nil {
-		// Case 2: No Host header, but we have a Resolver.
-		// We must guess the split between host and path parts in the subject.
+	} else {
+		// Case 2: No Host header.
+		// We fallback to checking subject parts but avoid heuristic guessing loop.
 		// Subject format: prefix.scheme.method.<reversed-host-parts>.<path-parts>
-		// We iterate through possible splits and ask the Resolver if it knows the host.
+		// Without a clear delimiter or fixed host length, parsing is ambiguous if host/path parts vary.
+		// However, if we assume standard 1-segment host (internal services) or try to resolve
+		// against known hosts if Resolver supports it?
+		// For now, we fallback to the "Legacy" assumption: Host is 1 part (parts[3]).
+		// This is deterministic but limited.
+		// If users want multi-segment hosts, they MUST provide Host header.
 
-		subjectSuffix := parts[3:] // host parts + path parts
-
-		// Try increasing lengths of host segments
-		for i := 1; i <= len(subjectSuffix); i++ {
-			hostParts := subjectSuffix[:i]
-			pathParts := subjectSuffix[i:]
-
-			// Reconstruct host from reversed parts
-			// e.g. ["localhost", "whoami"] -> "whoami.localhost"
-			// e.g. ["localhost"] -> "localhost"
-
-			// Reverse the parts slice to get normal order
-			// copy to avoid mutating underlying array if needed, though here we just join
-			reversedParts := make([]string, len(hostParts))
-			for j, p := range hostParts {
-				reversedParts[len(hostParts)-1-j] = p
-			}
-			candidateHost := strings.Join(reversedParts, ".")
-
-			candidatePath := ""
-			if len(pathParts) > 0 {
-				candidatePath = strings.Join(pathParts, "/")
-			}
-
-			// Check if this combination resolves
-			u, err = r.Resolver.Resolve(ctx, candidateHost, candidatePath)
-			if err != nil {
-				continue // Error means lookup failed or invalid, try next
-			}
-			if u != nil {
-				// Match found!
-				host = candidateHost
-				path = candidatePath
-				break
-			}
-		}
-
-		if u == nil {
-			// Fallback if no resolution found: assume 1 segment host
-			// This matches legacy/default behavior
+		if len(parts) > 3 {
 			host = parts[3]
 			if len(parts) > 4 {
 				path = strings.Join(parts[4:], "/")
 			}
-			// u is still nil, will fall through to direct proxying logic
 		}
 
-	} else {
-		// Case 3: No Host header, No Resolver.
-		// Fallback to simple 1-segment assumption.
-		host = parts[3]
-		if len(parts) > 4 {
-			path = strings.Join(parts[4:], "/")
+		if r.Resolver != nil {
+			u, err = r.Resolver.Resolve(ctx, host, path)
+			// If resolution fails, u is nil, fallthrough to direct proxy
+			if err != nil {
+				// slog.Debug("Resolver lookup failed for fallback host", "host", host)
+			}
 		}
 	}
 

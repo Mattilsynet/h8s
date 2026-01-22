@@ -30,13 +30,15 @@ func TestController_Routing(t *testing.T) {
 	// Alternatively, we can construct the controller struct directly since it's in the same package (whitebox).
 
 	ctrl := &Controller{
-		client: client,
+		client:     client,
+		routes:     make(map[string]map[string]string),
+		knownHosts: make(map[string]bool),
 		// proxy: nil, // We must ensure we don't hit the subscription logic that uses proxy
 	}
 
 	// Note: knownHosts check in updateIngress prevents calling SubscribeForHost if we pre-populate it.
-	ctrl.knownHosts.Store("api.example.com", true)
-	ctrl.knownHosts.Store("app.example.com", true)
+	ctrl.knownHosts["api.example.com"] = true
+	ctrl.knownHosts["app.example.com"] = true
 
 	// 2. Define an Ingress
 	ing := &networkingv1.Ingress{
@@ -88,8 +90,12 @@ func TestController_Routing(t *testing.T) {
 		},
 	}
 
-	// 3. Trigger Update
-	ctrl.updateIngress(ing)
+	// 3. Trigger Update via Reconcile
+	// Mock the lister
+	ctrl.lister = func() ([]*networkingv1.Ingress, error) {
+		return []*networkingv1.Ingress{ing}, nil
+	}
+	ctrl.reconcile()
 
 	// 4. Verify Resolution
 
