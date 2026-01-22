@@ -156,7 +156,7 @@ func main() {
 			slog.Error("Invalid backend-url", "error", err)
 			os.Exit(1)
 		}
-		proxy.BackendURL = u
+		proxy.Resolver = &h8sreverse.StaticResolver{BackendURL: u}
 		slog.Info("Configured backend", "url", u.String())
 	}
 

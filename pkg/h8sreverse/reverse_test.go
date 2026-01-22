@@ -111,6 +111,83 @@ func TestRootPath(t *testing.T) {
 // errorTransport returns an error on RoundTrip
 type errorTransport struct{}
 
+// mockResolver implements BackendResolver for testing
+type mockResolver struct {
+	ResolveFunc func(ctx context.Context, host, path string) (*url.URL, error)
+}
+
+func (m *mockResolver) Resolve(ctx context.Context, host, path string) (*url.URL, error) {
+	if m.ResolveFunc != nil {
+		return m.ResolveFunc(ctx, host, path)
+	}
+	return nil, nil
+}
+
+func TestReverseProxy_DynamicResolver(t *testing.T) {
+	ns := startEmbeddedNATS(t)
+	nc, err := nats.Connect(ns.ClientURL())
+	require.NoError(t, err)
+	defer nc.Drain()
+
+	rp := NewReverseProxy(nc)
+
+	// Create a mock backend server
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Backend", "dynamic")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("dynamic response"))
+	}))
+	defer backend.Close()
+	backendURL, _ := url.Parse(backend.URL)
+
+	// Configure resolver to point to mock backend for specific host
+	rp.Resolver = &mockResolver{
+		ResolveFunc: func(ctx context.Context, host, path string) (*url.URL, error) {
+			// Proxy logic splits subject by dot. "dynamic_local" is a single token, so it works.
+			if host == "dynamic_local" {
+				return backendURL, nil
+			}
+			return nil, nil
+		},
+	}
+
+	// Subscribe
+	err = rp.SubscribeAll(context.Background())
+	require.NoError(t, err)
+
+	// 1. Test Match
+	// Use underscore to make it a single token in NATS subject
+	subject := subjectmapper.SubjectPrefix + ".http.GET.dynamic_local.foo"
+	msg := &nats.Msg{Subject: subject, Reply: "_INBOX.dyn1", Data: []byte("")}
+
+	replySub, err := nc.SubscribeSync(msg.Reply)
+	require.NoError(t, err)
+	err = nc.PublishMsg(msg)
+	require.NoError(t, err)
+
+	reply, err := replySub.NextMsgWithContext(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "200", reply.Header.Get("Status-Code"))
+	require.Equal(t, "dynamic", reply.Header.Get("X-Backend"))
+	require.Equal(t, "dynamic response", string(reply.Data))
+
+	// 2. Test No Match (should fail or default)
+	// If resolver returns nil, reverse proxy currently falls back to direct connection
+	// which will fail for a fake host "unknown.local" in this environment.
+	subject2 := subjectmapper.SubjectPrefix + ".http.GET.unknown.local.foo"
+	msg2 := &nats.Msg{Subject: subject2, Reply: "_INBOX.dyn2", Data: []byte("")}
+
+	replySub2, err := nc.SubscribeSync(msg2.Reply)
+	require.NoError(t, err)
+	err = nc.PublishMsg(msg2)
+	require.NoError(t, err)
+
+	reply2, err := replySub2.NextMsgWithContext(context.Background())
+	require.NoError(t, err)
+	// Expect 502 because unknown.local doesn't resolve/exist
+	require.Equal(t, "502", reply2.Header.Get("Status-Code"))
+}
+
 func (t *errorTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return nil, io.ErrUnexpectedEOF
 }

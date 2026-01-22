@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats
+  namespace: default
+spec:
+  ports:
+    - protocol: TCP
+      port: 4222
+      targetPort: 4222
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: nats
+  namespace: default
+subsets:
+  - addresses:
+      - ip: 172.20.0.2
+    ports:
+      - port: 4222

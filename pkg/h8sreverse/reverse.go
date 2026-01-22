@@ -24,9 +24,9 @@ type ReverseProxy struct {
 	nats       *nats.Conn
 	client     *http.Client
 	wsConns    sync.Map // map[string]*websocket.Conn (key is Reply subject)
-	BackendURL *url.URL // Optional: Forward all requests to this backend
-	FilterHost string   // Optional: Only handle requests for this host (original hostname)
-	QueueGroup string   // Optional: NATS Queue Group for load balancing
+	Resolver   BackendResolver
+	FilterHost string // Optional: Only handle requests for this host (original hostname)
+	QueueGroup string // Optional: NATS Queue Group for load balancing
 	bufferPool *sync.Pool
 }
 
@@ -145,44 +145,133 @@ func (r *ReverseProxy) handleMsg(msg *nats.Msg) {
 
 	scheme := parts[1]
 	method := parts[2]
-	host := parts[3]
 
+	var host string
 	var path string
-	if len(parts) == 5 {
-		path = parts[4]
-	} else if len(parts) > 5 {
-		path = strings.Join(parts[4:], "/")
-	}
-
 	var urlStr string
-	if r.BackendURL != nil {
-		// Use configured backend
-		// Construct URL using backend scheme and host, but keep the path from the request
-		// Note: Request path from subject might already be empty or not what we want if we want to proxy to root?
-		// But in NATS subject, path is what came in.
-		// If BackendURL is http://localhost:8080, we want http://localhost:8080/path
+	var u *url.URL
+	var err error
 
-		targetPath := path
-		if r.BackendURL.Path != "" {
-			// If backend has a path prefix, join it? simple concatenation for now
-			if strings.HasSuffix(r.BackendURL.Path, "/") && strings.HasPrefix(targetPath, "/") {
-				targetPath = r.BackendURL.Path + targetPath[1:]
-			} else if !strings.HasSuffix(r.BackendURL.Path, "/") && !strings.HasPrefix(targetPath, "/") {
-				targetPath = r.BackendURL.Path + "/" + targetPath
-			} else {
-				targetPath = r.BackendURL.Path + targetPath
+	hostHeader := msg.Header.Get("Host")
+	ctx := context.Background()
+
+	if hostHeader != "" {
+		// Case 1: We have the Host header. This is the happy path.
+		host = hostHeader
+
+		// Calculate host segments to find where path starts
+		req := &http.Request{Host: host}
+		sm := subjectmapper.NewSubjectMap(req)
+		reversedHost := sm.ReversedHost()
+		hostSegments := strings.Split(reversedHost, ".")
+		pathStartIndex := 3 + len(hostSegments)
+
+		if len(parts) > pathStartIndex {
+			path = strings.Join(parts[pathStartIndex:], "/")
+		}
+
+		if r.Resolver != nil {
+			u, err = r.Resolver.Resolve(ctx, host, path)
+			if err != nil {
+				slog.Error("backend resolution failed", "host", host, "error", err)
+				r.publishError(msg, 502, "Backend not found")
+				return
+			}
+		}
+	} else if r.Resolver != nil {
+		// Case 2: No Host header, but we have a Resolver.
+		// We must guess the split between host and path parts in the subject.
+		// Subject format: prefix.scheme.method.<reversed-host-parts>.<path-parts>
+		// We iterate through possible splits and ask the Resolver if it knows the host.
+
+		subjectSuffix := parts[3:] // host parts + path parts
+
+		// Try increasing lengths of host segments
+		for i := 1; i <= len(subjectSuffix); i++ {
+			hostParts := subjectSuffix[:i]
+			pathParts := subjectSuffix[i:]
+
+			// Reconstruct host from reversed parts
+			// e.g. ["localhost", "whoami"] -> "whoami.localhost"
+			// e.g. ["localhost"] -> "localhost"
+
+			// Reverse the parts slice to get normal order
+			// copy to avoid mutating underlying array if needed, though here we just join
+			reversedParts := make([]string, len(hostParts))
+			for j, p := range hostParts {
+				reversedParts[len(hostParts)-1-j] = p
+			}
+			candidateHost := strings.Join(reversedParts, ".")
+
+			candidatePath := ""
+			if len(pathParts) > 0 {
+				candidatePath = strings.Join(pathParts, "/")
+			}
+
+			// Check if this combination resolves
+			u, err = r.Resolver.Resolve(ctx, candidateHost, candidatePath)
+			if err != nil {
+				continue // Error means lookup failed or invalid, try next
+			}
+			if u != nil {
+				// Match found!
+				host = candidateHost
+				path = candidatePath
+				break
 			}
 		}
 
-		u := *r.BackendURL // copy
-		u.Path = targetPath
-		// Query params? Subject mapping might not include them in path, usually they are in headers or not handled by basic mapping
-		// h8sproxy puts query string in a header? Not seeing one.
-		// Reconstructing from subject only gives path.
+		if u == nil {
+			// Fallback if no resolution found: assume 1 segment host
+			// This matches legacy/default behavior
+			host = parts[3]
+			if len(parts) > 4 {
+				path = strings.Join(parts[4:], "/")
+			}
+			// u is still nil, will fall through to direct proxying logic
+		}
 
-		urlStr = u.String()
 	} else {
+		// Case 3: No Host header, No Resolver.
+		// Fallback to simple 1-segment assumption.
+		host = parts[3]
+		if len(parts) > 4 {
+			path = strings.Join(parts[4:], "/")
+		}
+	}
+
+	if u == nil {
+		// No backend found via Resolver (or no Resolver).
+		// Fallback to direct proxying to the host extracted from subject.
 		urlStr = scheme + "://" + host + "/" + path
+		if r.Resolver != nil {
+			// Only log this if we actually expected a resolver to work
+			slog.Info("No resolver match, falling back to direct", "url", urlStr)
+		}
+	} else {
+		// Use configured backend
+		// Construct URL using backend scheme and host, but keep the path from the request
+
+		// We need to merge paths carefully.
+		// Resolver returned the base URL for the backend service (e.g. http://foo.svc.local)
+		// path from NATS subject is the relative path requested.
+
+		targetPath := path
+		// Prepend backend path if it exists (e.g. context root)
+		if u.Path != "" {
+			if strings.HasSuffix(u.Path, "/") && strings.HasPrefix(targetPath, "/") {
+				targetPath = u.Path + targetPath[1:]
+			} else if !strings.HasSuffix(u.Path, "/") && !strings.HasPrefix(targetPath, "/") {
+				targetPath = u.Path + "/" + targetPath
+			} else {
+				targetPath = u.Path + targetPath
+			}
+		}
+
+		// Copy the URL to avoid mutating the resolved one
+		uCopy := *u
+		uCopy.Path = targetPath
+		urlStr = uCopy.String()
 	}
 
 	req, err := http.NewRequest(method, urlStr, bytes.NewReader(msg.Data))
@@ -323,25 +412,34 @@ func (r *ReverseProxy) handleControlEstablished(msg *nats.Msg) {
 	}
 
 	u := "ws://" + host + path
-	if r.BackendURL != nil {
-		// Use configured backend
-		scheme := "ws"
-		if r.BackendURL.Scheme == "https" {
-			scheme = "wss"
+	if r.Resolver != nil {
+		ctx := context.Background()
+		resolved, err := r.Resolver.Resolve(ctx, host, path)
+		if err != nil {
+			slog.Error("handleControlEstablished: failed to resolve backend", "host", host, "error", err)
+			return
 		}
 
-		targetPath := path
-		if r.BackendURL.Path != "" {
-			if strings.HasSuffix(r.BackendURL.Path, "/") && strings.HasPrefix(targetPath, "/") {
-				targetPath = r.BackendURL.Path + targetPath[1:]
-			} else if !strings.HasSuffix(r.BackendURL.Path, "/") && !strings.HasPrefix(targetPath, "/") {
-				targetPath = r.BackendURL.Path + "/" + targetPath
-			} else {
-				targetPath = r.BackendURL.Path + targetPath
+		if resolved != nil {
+			// Use configured backend
+			scheme := "ws"
+			if resolved.Scheme == "https" {
+				scheme = "wss"
 			}
-		}
 
-		u = scheme + "://" + r.BackendURL.Host + targetPath
+			targetPath := path
+			if resolved.Path != "" {
+				if strings.HasSuffix(resolved.Path, "/") && strings.HasPrefix(targetPath, "/") {
+					targetPath = resolved.Path + targetPath[1:]
+				} else if !strings.HasSuffix(resolved.Path, "/") && !strings.HasPrefix(targetPath, "/") {
+					targetPath = resolved.Path + "/" + targetPath
+				} else {
+					targetPath = resolved.Path + targetPath
+				}
+			}
+
+			u = scheme + "://" + resolved.Host + targetPath
+		}
 	}
 
 	dialer := websocket.Dialer{

@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8srd
+  namespace: default
+  labels:
+    app: k8srd
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: k8srd
+  template:
+    metadata:
+      labels:
+        app: k8srd
+    spec:
+      serviceAccountName: h8s-ingress-controller
+      # dnsPolicy: ClusterFirstWithHostNet # This is usually the fix, let's try just standard policy without hostNetwork
+      containers:
+        - name: k8srd
+          image: h8s/k8srd:latest
+          imagePullPolicy: Never # For local development
+          env:
+            - name: NATS_URL
+              value: "nats://nats:4222" # Use service name again if we drop hostNetwork
+          resources:
+            limits:
+              memory: "128Mi"
+              cpu: "500m"

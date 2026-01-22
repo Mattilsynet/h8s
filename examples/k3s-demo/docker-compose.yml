@@ -1,0 +1,50 @@
+services:
+  # 1. The Message Broker (Central Nervous System)
+  nats:
+    image: nats:latest
+    command: "-js"
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+
+  # 2. The Edge Gateway (Public Entry Point)
+  # This sits on the "public internet" (your host port 8080)
+  # It wraps HTTP requests into NATS messages.
+  h8sd:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.h8sd
+    ports:
+      - "8080:8080"
+    environment:
+      - NATS_URL=nats://nats:4222
+      - OTEL_ENABLED=false
+      # In production, this would be a real domain or wildcard
+      # For demo, we treat localhost as the allowed host
+    depends_on:
+      - nats
+
+  # 3. The Kubernetes Cluster (Private Network)
+  # We run k3s inside Docker. It cannot be accessed directly from the host easily,
+  # simulating a private VPC/cluster.
+  k3s:
+    image: rancher/k3s:v1.28.5-k3s1
+    command: server --disable=traefik
+    tmpfs:
+      - /run
+      - /var/run
+    privileged: true
+    environment:
+      - K3S_KUBECONFIG_OUTPUT=/output/kubeconfig.yaml
+      - K3S_KUBECONFIG_MODE=666
+    volumes:
+      - k3s-server:/var/lib/rancher/k3s
+      # Mount our manifests so we can apply them from inside
+      - ../k8s:/manifests
+    ports:
+      - "6443:6443" # K8s API
+    depends_on:
+      - nats
+
+volumes:
+  k3s-server:
