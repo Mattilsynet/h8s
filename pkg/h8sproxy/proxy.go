@@ -520,6 +520,10 @@ func (h8s *H8Sproxy) handleWebSocket(res http.ResponseWriter, req *http.Request)
 
 	sm := subjectmapper.NewSubjectMap(req)
 	subscribeSubject := sm.InboxSubjectPrefix()
+	sessionID := req.URL.Query().Get("session")
+	if sessionID != "" {
+		subscribeSubject = fmt.Sprintf("mapv2.result.%s.>", sessionID)
+	}
 
 	wsConn := &WSConn{
 		Conn:             conn,
