@@ -9,6 +9,7 @@
 *.dylib
 local/
 *.creds
+**/*.wasm
 
 /h8srd
 config.yaml
