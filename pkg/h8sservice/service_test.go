@@ -30,7 +30,9 @@ func TestServiceDefaultsInterestPublishSubject(t *testing.T) {
 	client := NewService(nc)
 	client.AddRequestHandler("localhost", "/default", "GET", "http", myTestHandler{})
 
-	sub, err := nc.SubscribeSync(h8sproxy.H8SInterestControlSubject)
+	// Interest is now published to <base>.register.<reversed-host>
+	// For "localhost", reversed host is "localhost"
+	sub, err := nc.SubscribeSync(h8sproxy.H8SInterestControlSubject + ".register.localhost")
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -96,4 +98,43 @@ func TestAddRequestServiceAndHandlerInvoke(t *testing.T) {
 	// Clean up
 	cancel()
 	time.Sleep(200 * time.Millisecond) // allow shutdown
+}
+
+func TestServiceShutdownPublishesUnregisterMessages(t *testing.T) {
+	ns := natstest.StartEmbeddedNATSServer(t)
+	defer ns.Shutdown()
+
+	nc, err := nats.Connect(ns.ClientURL())
+	require.NoError(t, err)
+	defer nc.Drain()
+
+	client := NewService(nc)
+	client.AddRequestHandler("example.com", "/api", "GET", "http", myTestHandler{})
+	client.AddRequestHandler("example.com", "/health", "GET", "http", myTestHandler{})
+
+	// Subscribe to the host-scoped unregister subject before starting
+	// "example.com" reversed is "com.example"
+	unregSub, err := nc.SubscribeSync(
+		h8sproxy.H8SInterestControlSubject + ".unregister.com.example")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	client.ctx = ctx
+	client.cancel = cancel
+	go client.Run()
+
+	// Wait for at least one interest publish cycle
+	time.Sleep(1 * time.Second)
+
+	// Shutdown should publish unregister messages
+	client.Shutdown()
+
+	// We should receive 2 unregister messages (one per handler)
+	msg1, err := unregSub.NextMsg(2 * time.Second)
+	require.NoError(t, err, "should receive first unregister message")
+	require.NotEmpty(t, msg1.Data)
+
+	msg2, err := unregSub.NextMsg(2 * time.Second)
+	require.NoError(t, err, "should receive second unregister message")
+	require.NotEmpty(t, msg2.Data)
 }

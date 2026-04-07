@@ -257,11 +257,15 @@ func TestWebSocketProxy(t *testing.T) {
 	require.NoError(t, err)
 
 	// 3. Simulate "Connection Established" control message
+	// Control subjects now include the reversed host suffix
 	replySubject := "_INBOX.client1"
 	publishSubject := "h8s.ws.ws.localhost.ws"
 
+	// Derive reversed host for the control subject (port is stripped)
+	reversedHost := subjectmapper.ReverseHostname(host)
+
 	msg := &nats.Msg{
-		Subject: "h8s.control.ws.conn.established",
+		Subject: "h8s.control.ws.conn.established." + reversedHost,
 		Reply:   replySubject,
 		Header:  nats.Header{},
 	}
@@ -300,7 +304,7 @@ func TestWebSocketProxy(t *testing.T) {
 
 	// 6. Close Connection
 	closeMsg := &nats.Msg{
-		Subject: "h8s.control.ws.conn.closed",
+		Subject: "h8s.control.ws.conn.closed." + reversedHost,
 		Reply:   replySubject,
 	}
 	err = nc.PublishMsg(closeMsg)

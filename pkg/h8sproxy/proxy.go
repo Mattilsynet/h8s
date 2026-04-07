@@ -4,6 +4,7 @@ package h8sproxy
 
 import (
 	"bytes"
+	"context"
 	"crypto/subtle"
 	"fmt"
 	"io"
@@ -27,10 +28,17 @@ import (
 )
 
 const (
-	H8SControlSubjectPrefix                 = "h8s.control"
-	H8SControlWebsocketAll                  = H8SControlSubjectPrefix + ".ws.conn.*"
-	H8SControlWebsocketEstablished          = H8SControlSubjectPrefix + ".ws.conn.established"
-	H8SControlWebsocketClosed               = H8SControlSubjectPrefix + ".ws.conn.closed"
+	H8SControlSubjectPrefix              = "h8s.control"
+	H8SControlWebsocketAll               = H8SControlSubjectPrefix + ".ws.conn.*"
+	H8SControlWebsocketEstablishedPrefix = H8SControlSubjectPrefix + ".ws.conn.established"
+	H8SControlWebsocketClosedPrefix      = H8SControlSubjectPrefix + ".ws.conn.closed"
+	// H8SInterestControlSubject is the base prefix for interest subjects.
+	// The full subject hierarchy is:
+	//   <prefix>.register.<reversed-host>    — periodic interest registration
+	//   <prefix>.unregister.<reversed-host>  — fire-and-forget removal on shutdown
+	// The tracker subscribes to either exact host-scoped subjects or
+	// wildcard <prefix>.register.> / <prefix>.unregister.> when no
+	// host filters are configured.
 	H8SInterestControlSubject               = H8SControlSubjectPrefix + ".interest"
 	H8SControlConnectionClosedSubjectPrefix = H8SControlSubjectPrefix + ".connection.closed"
 
@@ -115,6 +123,13 @@ type H8Sproxy struct {
 	// AllowedOrigins configures optional WebSocket origin allowlist.
 	AllowedOrigins []string
 
+	// RespChanBuffer is the buffer size for per-request response channels.
+	// Larger values reduce the chance of dropping messages under burst load.
+	RespChanBuffer int
+	// WSSendBuffer is the buffer size for the per-WebSocket send channel.
+	// Larger values reduce the chance of dropping messages under burst load.
+	WSSendBuffer int
+
 	OTELTracer trace.Tracer // OpenTelemetry tracer for this connection
 	OTELMeter  metric.Meter // OpenTelemetry meter for this connection
 
@@ -132,6 +147,8 @@ type H8Sproxy struct {
 	NumberOfFailedRequests       metric.Int64Counter // Number of failed requests
 	NumberOfWebsocketConnections metric.Int64Gauge   // Number of WebSocket connections established
 	NumberOfInterests            metric.Int64Gauge   // Number of interests registered
+	NumberOfDroppedResponses     metric.Int64Counter // Number of response messages dropped due to full channel
+	NumberOfDroppedWSMessages    metric.Int64Counter // Number of WebSocket messages dropped due to full send channel
 }
 
 func NewH8Sproxy(natsConn *nats.Conn, opts ...Option) *H8Sproxy {
@@ -142,6 +159,8 @@ func NewH8Sproxy(natsConn *nats.Conn, opts ...Option) *H8Sproxy {
 		InterestOnly:   false,
 		PublishOnly:    false,
 		MaxBodySize:    2 * 1024 * 1024, // Default 2MB
+		RespChanBuffer: 128,             // Default response channel buffer
+		WSSendBuffer:   1024,            // Default WebSocket send channel buffer
 		// The OTEL Meter and Tracer by default get a NOOP by default.
 		OTELTracer: otel.GetTracerProvider().Tracer("h8s-proxy"),
 		OTELMeter:  otel.GetMeterProvider().Meter("h8s-proxy"),
@@ -204,6 +223,21 @@ func NewH8Sproxy(natsConn *nats.Conn, opts ...Option) *H8Sproxy {
 	if err != nil {
 		slog.Error("failed to create NumberOfWebsocketConnections metric", "error", err)
 	}
+
+	proxy.NumberOfDroppedResponses, err = proxy.OTELMeter.Int64Counter(
+		"h8s_dropped_responses",
+		metric.WithDescription("Number of response messages dropped because the per-request response channel was full."))
+	if err != nil {
+		slog.Error("failed to create NumberOfDroppedResponses metric", "error", err)
+	}
+
+	proxy.NumberOfDroppedWSMessages, err = proxy.OTELMeter.Int64Counter(
+		"h8s_dropped_ws_messages",
+		metric.WithDescription("Number of WebSocket messages dropped because the per-connection send channel was full."))
+	if err != nil {
+		slog.Error("failed to create NumberOfDroppedWSMessages metric", "error", err)
+	}
+
 	// Subscribe to persistent reply subject for this proxy instance
 	replySubject := fmt.Sprintf("%s.%s.*", subjectmapper.InboxPrefix, proxy.ProxyID)
 	_, err = proxy.NATSConn.Subscribe(replySubject, proxy.dispatch)
@@ -230,6 +264,7 @@ func (h8s *H8Sproxy) dispatch(msg *nats.Msg) {
 			select {
 			case respChan <- msg:
 			default:
+				h8s.NumberOfDroppedResponses.Add(context.Background(), 1)
 				slog.Warn("response channel full, dropping message", "reqID", reqID)
 			}
 		}
@@ -293,6 +328,18 @@ func WithMaxBodySize(size int64) Option {
 func WithAllowedOrigins(origins ...string) Option {
 	return func(h8s *H8Sproxy) {
 		h8s.AllowedOrigins = append(h8s.AllowedOrigins, origins...)
+	}
+}
+
+func WithRespChanBuffer(size int) Option {
+	return func(h8s *H8Sproxy) {
+		h8s.RespChanBuffer = size
+	}
+}
+
+func WithWSSendBuffer(size int) Option {
+	return func(h8s *H8Sproxy) {
+		h8s.WSSendBuffer = size
 	}
 }
 
@@ -413,7 +460,7 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 	}
 
 	// Create and register the response channel
-	respChan := make(chan *nats.Msg, 16) // Buffer to handle bursts
+	respChan := make(chan *nats.Msg, h8s.RespChanBuffer)
 	h8s.pendingReqs.Store(reqID, respChan)
 	defer h8s.pendingReqs.Delete(reqID)
 
@@ -525,12 +572,20 @@ func (h8s *H8Sproxy) handleWebSocket(res http.ResponseWriter, req *http.Request)
 		subscribeSubject = fmt.Sprintf("mapv2.result.%s.>", sessionID)
 	}
 
+	// Clone the request headers and explicitly set Host, which Go stores
+	// in req.Host rather than req.Header. Control messages rely on this
+	// header to route to the correct host-scoped subscriptions.
+	wsHeaders := req.Header.Clone()
+	if req.Host != "" && wsHeaders.Get("Host") == "" {
+		wsHeaders.Set("Host", req.Host)
+	}
+
 	wsConn := &WSConn{
 		Conn:             conn,
-		Send:             make(chan []byte, 256),
+		Send:             make(chan []byte, h8s.WSSendBuffer),
 		PublishSubject:   sm.WebSocketPublishSubject(),
 		SubscribeSubject: subscribeSubject,
-		Headers:          req.Header,
+		Headers:          wsHeaders,
 	}
 	defer close(wsConn.Send)
 
@@ -549,6 +604,7 @@ func (h8s *H8Sproxy) handleWebSocket(res http.ResponseWriter, req *http.Request)
 		select {
 		case wsConn.Send <- msg.Data:
 		default:
+			h8s.NumberOfDroppedWSMessages.Add(context.Background(), 1)
 			slog.Warn("Send channel full, dropping message", "subject", msg.Subject)
 		}
 	})
@@ -602,11 +658,17 @@ func (h8s *H8Sproxy) handleWebSocket(res http.ResponseWriter, req *http.Request)
 }
 
 // cmConnectionEstablished publishes a message on the control channel indicating that
-// a websocket connection has been established.
+// a websocket connection has been established. The control subject is scoped to the
+// reversed hostname so only subscribers for that host receive it.
 func (h8s *H8Sproxy) cmConnectionEstablished(wsConn *WSConn) {
+	// Derive host from the headers (set by the pre-req Host header fix)
+	host := wsConn.Headers.Get("Host")
+	reversedHost := subjectmapper.ReverseHostname(host)
+	subject := H8SControlWebsocketEstablishedPrefix + "." + reversedHost
+
 	// Soft include of controlMessage on establish of websocket connection.
 	controlMessage := &nats.Msg{
-		Subject: H8SControlWebsocketEstablished,
+		Subject: subject,
 		Reply:   wsConn.SubscribeSubject,
 		Header:  nats.Header(wsConn.Headers),
 	}
@@ -620,19 +682,25 @@ func (h8s *H8Sproxy) cmConnectionEstablished(wsConn *WSConn) {
 	}
 	slog.Info(
 		"published control message",
-		"subject", wsConn.PublishSubject)
+		"subject", subject,
+		"host", host)
 }
 
 // cmConnectionClosed publishes a message on the control channel indicating that
-// a websocket connection has been closed or cannot be written to.
+// a websocket connection has been closed or cannot be written to. The control
+// subject is scoped to the reversed hostname.
 func (h8s *H8Sproxy) cmConnectionClosed(secKey string) {
 	wsConn := h8s.WSPool.Get(secKey)
 	if wsConn == nil {
 		return
 	}
 
+	host := wsConn.Headers.Get("Host")
+	reversedHost := subjectmapper.ReverseHostname(host)
+	subject := H8SControlWebsocketClosedPrefix + "." + reversedHost
+
 	controlMsg := &nats.Msg{
-		Subject: H8SControlWebsocketClosed,
+		Subject: subject,
 		Reply:   wsConn.SubscribeSubject,
 		Header:  nats.Header(wsConn.Headers),
 	}
@@ -645,7 +713,7 @@ func (h8s *H8Sproxy) cmConnectionClosed(secKey string) {
 	}
 	slog.Info(
 		"connection closed, published control message",
-		"message", controlMsg,
+		"subject", subject,
 	)
 }
 
