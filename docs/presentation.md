@@ -97,7 +97,7 @@ graph LR
 
 **The Transport**
 
-request: `GET /foo` -> Subject: `virt.foo.com`
+request: `GET /foo` -> Subject: `h8s.http.GET.com.foo.>`
 
 
 
@@ -112,14 +112,19 @@ request: `GET /foo` -> Subject: `virt.foo.com`
 **The Agent**
 
 - Connects OUTBOUND to NATS (no firewall holes needed!).
-- Subscribes to subjects (e.g., `virt.foo.com`).
+- Subscribes per hostname (e.g., `h8s.http.*.com.foo.>`).
 - Forwards traffic to `localhost:8080` (or any target).
 - Sends the response back to NATS.
 
 ```bash
 # Example Run (Private Network)
-./h8srd --nats-url="nats://demo.nats.io:4222"
+./h8srd \
+  --nats-url="nats://demo.nats.io:4222" \
+  --hostname="myapp.example.com" \
+  --backend-url="http://localhost:8080"
 ```
+
+> `--hostname` (or `H8SRD_HOSTNAME`) is required for per-hostname subscriptions.
 
 <!-- end_slide -->
 
@@ -127,11 +132,11 @@ request: `GET /foo` -> Subject: `virt.foo.com`
 
 1. **User** makes request to `https://myapp.example.com`.
 2. **h8sd** receives request.
-   - Maps `Host: myapp.example.com` to subject `virt.myapp.example.com`.
+   - Maps `Host: myapp.example.com` to host-scoped subject(s), e.g. `h8s.http.GET.com.myapp.>`.
    - Packs Headers + Body into a NATS Msg.
    - Publishes & Waits.
 3. **NATS** routes message to subscriber.
-4. **h8srd** (subscribed to `virt.myapp.example.com`) receives Msg.
+4. **h8srd** (subscribed for `myapp.example.com`) receives Msg.
 5. **h8srd** requests `http://localhost:8080`.
 6. **App** responds.
 7. **h8srd** replies to NATS inbox.
