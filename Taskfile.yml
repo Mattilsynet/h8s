@@ -1,0 +1,84 @@
+version: '3'
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  fmt-check:
+    desc: Verify Go files are formatted
+    cmds:
+      - |
+        files="$(git ls-files '*.go')"
+        if [ -z "$files" ]; then
+          echo "No Go files found"
+          exit 0
+        fi
+        unformatted="$(git ls-files -z '*.go' | xargs -0 -r gofmt -l)"
+        if [ -n "$unformatted" ]; then
+          echo "Unformatted Go files:"
+          echo "$unformatted"
+          exit 1
+        fi
+
+  fmt:
+    desc: Format Go files in-place
+    cmds:
+      - git ls-files -z '*.go' | xargs -0 -r gofmt -w
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+
+  test:
+    desc: Run unit tests
+    cmds:
+      - go test ./...
+
+  test-race:
+    desc: Run tests with race detector
+    cmds:
+      - go test -race ./...
+
+  coverage:
+    desc: Generate and summarize coverage report
+    cmds:
+      - go test ./... -coverprofile=coverage.out
+      - go tool cover -func=coverage.out
+
+  bench:
+    desc: Run h8sproxy benchmarks
+    cmds:
+      - go test -bench=. -benchmem -v ./pkg/h8sproxy
+
+  build:h8sd:
+    desc: Build h8sd binary
+    cmds:
+      - go build -o h8sd ./cmd/h8sd
+
+  build:h8srd:
+    desc: Build h8srd binary
+    cmds:
+      - go build -o h8srd ./cmd/h8srd
+
+  build:k8srd:
+    desc: Build k8srd binary
+    cmds:
+      - go build -o k8srd ./cmd/k8srd
+
+  build:
+    desc: Build all binaries
+    deps:
+      - build:h8sd
+      - build:h8srd
+      - build:k8srd
+
+  ci:
+    desc: Run deterministic CI checks (race as separate job)
+    deps:
+      - fmt-check
+      - vet
+      - test
+      - coverage

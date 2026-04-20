@@ -185,8 +185,45 @@ graph TB
 ./h8srd \
   --nats-url="nats://demo.nats.io:4222" \
   --nats-creds="./user.creds"
-  --nats-creds="./user.creds"
 ```
+
+## Task-based Project Automation
+
+This project ships with a root `Taskfile.yml` for repeatable local automation and CI consistency.
+
+Install Task (go-task):
+
+```bash
+# Linux / macOS via script
+sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d
+
+# Homebrew
+brew install go-task
+```
+
+Common commands:
+
+```bash
+# Show available tasks
+task
+
+# Deterministic CI checks (format check, vet, tests, coverage)
+task ci
+
+# Build all binaries (h8sd, h8srd, k8srd)
+task build
+
+# Heavier race detector checks (run separately)
+task test-race
+```
+
+Notes:
+
+- `task ci` is verification-oriented and should not mutate tracked files.
+- In CI, we enforce a clean working tree after `task ci` (`git status --porcelain` must be empty).
+- Race tests are intentionally separate from `task ci` to keep default CI fast and predictable.
+- Docker image publishing is performed from tagged releases (`v*`) in GitHub Actions.
+- Stable tags (no `-` in tag name) publish both `:<tag>` and `:latest`; pre-release tags publish only `:<tag>`.
 
 ## Performance & Benchmarking
 
@@ -230,4 +267,3 @@ go tool pprof -http=:8081 mem.out
 This opens an interactive web UI for profiling.
 
 Note: `go tool pprof` uses Graphviz for some visualizations, so install `graphviz` for full functionality.
-
