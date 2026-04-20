@@ -43,6 +43,8 @@ var (
 	hostFiltersFlag      = flag.String("host-filters", "", "Comma separated list of allowed hosts (e.g. 'example.com,api.example.com')")
 	requestTimeoutFlag   = flag.Duration("request-timeout", 30*time.Second, "Timeout for upstream requests")
 	allowedOriginsFlag   = flag.String("allowed-origins", "", "Comma separated list of allowed WebSocket Origin values (default allows all origins)")
+	respChanBufferFlag   = flag.Int("resp-chan-buffer", 128, "Buffer size for per-request response channels")
+	wsSendBufferFlag     = flag.Int("ws-send-buffer", 1024, "Buffer size for per-WebSocket send channels")
 )
 
 func NATSConnect(opts NATSConnectionOptions) (*nats.Conn, error) {
@@ -148,6 +150,22 @@ func main() {
 			itOptions = append(itOptions, tracker.WithOTELMeter(otel.Meter))
 		}
 
+		// When host filters are configured, scope interest subscriptions
+		// to only the relevant hosts. This avoids processing interest
+		// messages for hosts this instance doesn't serve.
+		if *hostFiltersFlag != "" {
+			hosts := strings.Split(*hostFiltersFlag, ",")
+			var trimmedHosts []string
+			for _, host := range hosts {
+				if trimmed := strings.TrimSpace(host); trimmed != "" {
+					trimmedHosts = append(trimmedHosts, trimmed)
+				}
+			}
+			if len(trimmedHosts) > 0 {
+				itOptions = append(itOptions, tracker.WithHostFilters(trimmedHosts))
+			}
+		}
+
 		h8stracker := tracker.NewInterestTracker(
 			nc,
 			itOptions...)
@@ -207,6 +225,14 @@ func main() {
 
 	if *requestTimeoutFlag > 0 {
 		executionOptions = append(executionOptions, h8s.WithRequestTimeout(*requestTimeoutFlag))
+	}
+
+	if *respChanBufferFlag > 0 {
+		executionOptions = append(executionOptions, h8s.WithRespChanBuffer(*respChanBufferFlag))
+	}
+
+	if *wsSendBufferFlag > 0 {
+		executionOptions = append(executionOptions, h8s.WithWSSendBuffer(*wsSendBufferFlag))
 	}
 
 	h8sproxy := h8s.NewH8Sproxy(

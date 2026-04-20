@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -185,26 +186,48 @@ func (c *Service) Run() {
 	}
 
 	c.wg.Add(2)
-	// Listen for websocket connection events
+	// Listen for websocket connection events, scoped to hosts this service handles.
 	go func() {
 		defer c.wg.Done()
-		if _, err := c.natsConn.Subscribe(
-			h8sproxy.H8SControlWebsocketAll,
-			func(msg *nats.Msg) {
-				switch msg.Subject {
-				case h8sproxy.H8SControlWebsocketClosed:
-					c.websocketConnections.Delete(msg.Reply)
-				case h8sproxy.H8SControlWebsocketEstablished:
-					c.websocketConnections.Add(
-						msg.Reply,
-						msg)
-				}
-			}); err != nil {
-			slog.Error(
-				"failed to subscribe to control subject",
-				"error", err,
-				"subject", h8sproxy.H8SControlWebsocketAll)
+
+		// Collect unique hosts from registered handlers
+		hostSet := make(map[string]struct{})
+		for _, config := range c.websocketServices {
+			hostSet[config.Host] = struct{}{}
 		}
+		for _, config := range c.requestServices {
+			if h, ok := config.Metadata["host"]; ok {
+				hostSet[h] = struct{}{}
+			}
+		}
+
+		controlHandler := func(msg *nats.Msg) {
+			switch {
+			case strings.HasPrefix(msg.Subject, h8sproxy.H8SControlWebsocketClosedPrefix):
+				c.websocketConnections.Delete(msg.Reply)
+			case strings.HasPrefix(msg.Subject, h8sproxy.H8SControlWebsocketEstablishedPrefix):
+				c.websocketConnections.Add(
+					msg.Reply,
+					msg)
+			}
+		}
+
+		// Subscribe to host-specific control subjects
+		for host := range hostSet {
+			reversedHost := subjectmapper.ReverseHostname(host)
+			estSubject := h8sproxy.H8SControlWebsocketEstablishedPrefix + "." + reversedHost
+			closedSubject := h8sproxy.H8SControlWebsocketClosedPrefix + "." + reversedHost
+			if _, err := c.natsConn.Subscribe(estSubject, controlHandler); err != nil {
+				slog.Error("failed to subscribe to WS established control subject",
+					"error", err, "subject", estSubject)
+			}
+			if _, err := c.natsConn.Subscribe(closedSubject, controlHandler); err != nil {
+				slog.Error("failed to subscribe to WS closed control subject",
+					"error", err, "subject", closedSubject)
+			}
+			slog.Info("subscribed to host-scoped WS control subjects", "host", host)
+		}
+
 		<-c.ctx.Done()
 	}()
 
@@ -229,8 +252,11 @@ func (c *Service) Run() {
 					slog.Error("unable to marshal Interest", "error", err)
 					continue
 				}
-				if err := c.natsConn.Publish(c.InterestPublishSubject, bytes); err != nil {
-					slog.Error("unable to publish Interest", "error", err, "subject", config.Endpoint.Subject)
+				// Publish to host-scoped interest subject: <prefix>.register.<reversed-host>
+				reversedHost := subjectmapper.ReverseHostname(interest.Host)
+				subject := c.InterestPublishSubject + ".register." + reversedHost
+				if err := c.natsConn.Publish(subject, bytes); err != nil {
+					slog.Error("unable to publish Interest", "error", err, "subject", subject)
 				}
 			}
 
@@ -245,8 +271,11 @@ func (c *Service) Run() {
 					slog.Error("unable to marshal Interest", "error", err)
 					continue
 				}
-				if err := c.natsConn.Publish(c.InterestPublishSubject, bytes); err != nil {
-					slog.Error("unable to publish Interest", "error", err, "subject", config.ReceiveSubject)
+				// Publish to host-scoped interest subject: <prefix>.register.<reversed-host>
+				reversedHost := subjectmapper.ReverseHostname(interest.Host)
+				subject := c.InterestPublishSubject + ".register." + reversedHost
+				if err := c.natsConn.Publish(subject, bytes); err != nil {
+					slog.Error("unable to publish Interest", "error", err, "subject", subject)
 				}
 
 			}
@@ -302,9 +331,60 @@ func (c *Service) RegisterWebsocketHandler(handler *WebsocketHandler) {
 
 func (c *Service) Shutdown() {
 	slog.Info("shutting down service")
+
+	// Fire-and-forget: publish unregister messages for all interests before
+	// canceling context. This gives the tracker immediate removal instead of
+	// waiting for TTL eviction.
+	c.publishInterestUnregistrations()
+
 	if c.cancel != nil {
 		c.cancel()
 	}
 	c.wg.Wait()
 	slog.Info("service shutdown complete")
+}
+
+// publishInterestUnregistrations publishes an unregister message for every
+// interest this service has been advertising. Best-effort / fire-and-forget:
+// if any publish fails we log and continue. The tracker TTL eviction is the
+// safety net.
+func (c *Service) publishInterestUnregistrations() {
+	for _, config := range c.requestServices {
+		interest := tracker.Interest{
+			Host:   config.Metadata["host"],
+			Path:   config.Metadata["path"],
+			Method: config.Metadata["method"],
+		}
+		bytes, err := json.Marshal(interest)
+		if err != nil {
+			slog.Error("unable to marshal Interest for unregister", "error", err)
+			continue
+		}
+		reversedHost := subjectmapper.ReverseHostname(interest.Host)
+		subject := c.InterestPublishSubject + ".unregister." + reversedHost
+		if err := c.natsConn.Publish(subject, bytes); err != nil {
+			slog.Error("unable to publish interest unregister", "error", err, "subject", subject)
+		}
+	}
+
+	for _, config := range c.websocketServices {
+		interest := tracker.Interest{
+			Host:   config.Host,
+			Path:   config.Path,
+			Method: "ws",
+		}
+		bytes, err := json.Marshal(interest)
+		if err != nil {
+			slog.Error("unable to marshal Interest for unregister", "error", err)
+			continue
+		}
+		reversedHost := subjectmapper.ReverseHostname(interest.Host)
+		subject := c.InterestPublishSubject + ".unregister." + reversedHost
+		if err := c.natsConn.Publish(subject, bytes); err != nil {
+			slog.Error("unable to publish interest unregister", "error", err, "subject", subject)
+		}
+	}
+
+	// Best-effort flush so unregister messages are sent before NATS conn drains.
+	_ = c.natsConn.FlushTimeout(500 * time.Millisecond)
 }

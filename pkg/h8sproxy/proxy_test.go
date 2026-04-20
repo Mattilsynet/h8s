@@ -167,9 +167,8 @@ func TestHandleWebSocket_NATSPubSubAndWS(t *testing.T) {
 			Subject: msg.Reply,
 			Data:    []byte("pong"),
 		}
-		err = nc.PublishMsg(reply)
-		if err != nil {
-			t.Logf("Error publishing reply: %v", err)
+		if pubErr := nc.PublishMsg(reply); pubErr != nil {
+			t.Logf("Error publishing reply: %v", pubErr)
 		}
 	})
 	require.NoError(t, subErr)

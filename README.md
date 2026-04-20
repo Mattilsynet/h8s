@@ -177,16 +177,102 @@ graph TB
 
 `h8srd` runs alongside your backend service, subscribes to NATS subjects, and forwards requests to your local service.
 
-```bash
-# Basic usage
-./h8srd --nats-url="nats://localhost:4222"
+> [!IMPORTANT]
+> **Breaking change (per-hostname routing):** `h8srd` now subscribes per hostname.
+> You must set `--hostname` (or `H8SRD_HOSTNAME`) for each `h8srd` instance.
 
-# With credentials
+#### h8srd configuration reference
+
+| Flag | Env var | Required | Default | Description |
+|---|---|---|---|---|
+| `--nats-url` | `NATS_URL` | No | `nats://0.0.0.0:4222` | NATS server URL |
+| `--nats-creds` | `NATS_CREDS_PATH` | No | empty | Path to NATS credentials |
+| `--hostname` | `H8SRD_HOSTNAME` | **Yes** | empty | Public hostname this instance handles |
+| `--backend-url` | `H8SRD_BACKEND_URL` | No (recommended) | empty | Local/backend URL (e.g. `http://localhost:8080`) |
+| `--queue-group` | `H8SRD_QUEUE_GROUP` | No | empty | Queue group for data subjects |
+
+#### Hostname semantics
+
+- `--hostname`/`H8SRD_HOSTNAME` must match the host your `h8sd` traffic uses for this route.
+- In many deployments this includes port in development (for example `localhost:8080`).
+- If host matching is inconsistent, you may see **HTTP requests working while WebSocket upgrade/control flow fails**.
+
+#### Recommended run examples
+
+```bash
+# CLI flags (recommended)
 ./h8srd \
   --nats-url="nats://demo.nats.io:4222" \
-  --nats-creds="./user.creds"
-  --nats-creds="./user.creds"
+  --hostname="api.example.com" \
+  --backend-url="http://localhost:8080"
+
+# With credentials and queue group
+./h8srd \
+  --nats-url="nats://demo.nats.io:4222" \
+  --nats-creds="./user.creds" \
+  --hostname="api.example.com" \
+  --backend-url="http://localhost:8080" \
+  --queue-group="api-workers"
+
+# Environment-variable style
+export NATS_URL="nats://demo.nats.io:4222"
+export H8SRD_HOSTNAME="api.example.com"
+export H8SRD_BACKEND_URL="http://localhost:8080"
+./h8srd
 ```
+
+#### Multi-instance deployment notes
+
+- Run one or more `h8srd` instances per hostname.
+- Queue groups are used for **data subjects** (HTTP/WS frames) for load balancing.
+- WebSocket control subjects are intentionally not queue-grouped, so each relevant instance receives control messages.
+
+#### Troubleshooting
+
+- **`hostname flag is required` on startup**
+  - Set `--hostname` or `H8SRD_HOSTNAME`.
+- **HTTP works, WebSocket fails/intermittent WS issues**
+  - Verify hostname consistency between ingress host and `H8SRD_HOSTNAME` (including host:port where applicable).
+- **Unexpected backend routing**
+  - Set `--backend-url`/`H8SRD_BACKEND_URL` explicitly; leaving it unset can cause fallback routing based on request host.
+
+## Task-based Project Automation
+
+This project ships with a root `Taskfile.yml` for repeatable local automation and CI consistency.
+
+Install Task (go-task):
+
+```bash
+# Linux / macOS via script
+sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d
+
+# Homebrew
+brew install go-task
+```
+
+Common commands:
+
+```bash
+# Show available tasks
+task
+
+# Deterministic CI checks (format check, vet, tests, coverage)
+task ci
+
+# Build all binaries (h8sd, h8srd, k8srd)
+task build
+
+# Heavier race detector checks (run separately)
+task test-race
+```
+
+Notes:
+
+- `task ci` is verification-oriented and should not mutate tracked files.
+- In CI, we enforce a clean working tree after `task ci` (`git status --porcelain` must be empty).
+- Race tests are intentionally separate from `task ci` to keep default CI fast and predictable.
+- Docker image publishing is performed from tagged releases (`v*`) in GitHub Actions.
+- Stable tags (no `-` in tag name) publish both `:<tag>` and `:latest`; pre-release tags publish only `:<tag>`.
 
 ## Performance & Benchmarking
 
@@ -230,4 +316,3 @@ go tool pprof -http=:8081 mem.out
 This opens an interactive web UI for profiling.
 
 Note: `go tool pprof` uses Graphviz for some visualizations, so install `graphviz` for full functionality.
-

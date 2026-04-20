@@ -109,6 +109,33 @@ func TestSubjectMapperProcessHost(t *testing.T) {
 	}
 }
 
+func TestReverseHostname(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"simple domain", "example.com", "com.example"},
+		{"multi-part domain", "foo.bar.example.com", "com.example.bar.foo"},
+		{"IPv4 no port", "127.0.0.1", "127.0.0.1"},
+		{"IPv4 with port", "127.0.0.1:8080", "127.0.0.1"},
+		{"IPv6 bracketed with port", "[2001:db8::1]:443", "2001_db8__1"},
+		{"IPv6 bracketed no port", "[2001:db8::1]", "2001_db8__1"},
+		{"single label", "localhost", "localhost"},
+		{"domain with port", "example.com:8080", "com.example"},
+		{"empty string", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ReverseHostname(tt.input)
+			if got != tt.want {
+				t.Errorf("ReverseHostname(%q) = %q; want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSubjectMapperPublishSubject(t *testing.T) {
 	tests := []struct {
 		name          string

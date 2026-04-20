@@ -129,7 +129,7 @@ func TestInterestOnlyMode_AllowsRegisteredInterest(t *testing.T) {
 	}
 	data, err := json.Marshal(interest)
 	require.NoError(t, err)
-	require.NoError(t, nc.Publish(interestSubject, data))
+	require.NoError(t, nc.Publish(interestSubject+".register.com.allowed", data))
 	require.NoError(t, nc.FlushTimeout(1*time.Second))
 
 	require.Eventually(t, func() bool {
@@ -208,7 +208,7 @@ func TestInterestSubjectAlignment(t *testing.T) {
 	interest := tracker.Interest{Host: "aligned.com", Path: "/ping", Method: "GET"}
 	payload, err := json.Marshal(interest)
 	require.NoError(t, err)
-	require.NoError(t, nc.Publish(H8SInterestControlSubject, payload))
+	require.NoError(t, nc.Publish(H8SInterestControlSubject+".register.com.aligned", payload))
 	require.NoError(t, nc.FlushTimeout(1*time.Second))
 
 	require.Eventually(t, func() bool {

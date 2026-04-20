@@ -4,6 +4,10 @@ This demo runs the full H8S stack using Docker Compose, **building `h8sd` and `h
 This allows for rapid testing of local changes without the need to push versioned images to a remote registry.
 It uses `kennethreitz/httpbin` as the backend to demonstrate HTTP, WebSocket, and SSE capabilities.
 
+> [!IMPORTANT]
+> This demo uses per-hostname `h8srd` routing. `H8SRD_HOSTNAME` is required and is set in `docker-compose.yml`.
+> In this demo the value is `localhost:8080`.
+
 ## Components
 
 - **nats**: The messaging backbone.

@@ -255,6 +255,18 @@ func (sm *SubjectMap) processPath(path string) {
 	sm.Path = strings.Join(safe, ".")
 }
 
+// ReverseHostname returns the reversed hostname suitable for use as a NATS
+// subject token. Domain names are reversed ("foo.bar.com" → "com.bar.foo"),
+// IP addresses are kept as-is with colons replaced by underscores, and any
+// port suffix is stripped. This is the same logic used by processHost but
+// exposed as a standalone function for use in interest subjects and control
+// message routing.
+func ReverseHostname(host string) string {
+	sm := &SubjectMap{}
+	sm.processHost(host)
+	return sm.Host
+}
+
 // HTTPReqFromArgs creates an *http.Request from the given arguments.
 // Should reduce the number of support functions and different usecases in the module.
 func HTTPReqFromArgs(scheme string, host string, path string, method string) *http.Request {

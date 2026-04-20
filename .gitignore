@@ -11,6 +11,7 @@ local/
 *.creds
 **/*.wasm
 
+/h8sd
 /h8srd
 config.yaml
 

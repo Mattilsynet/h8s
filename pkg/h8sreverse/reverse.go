@@ -67,14 +67,13 @@ func NewReverseProxy(nc *nats.Conn) *ReverseProxy {
 // Paths: []string{"/api/users"} => subject "h8s.http.GET.h8s/..api/users".
 // This function builds the wildcard subjects accordingly.
 func (r *ReverseProxy) SubscribeAll(ctx context.Context) error {
-	patterns := []string{
+	// Data subjects use queue groups for load balancing
+	dataPatterns := []string{
 		subjectmapper.SubjectPrefix + ".http.*.*.>",
 		subjectmapper.SubjectPrefix + ".http.*.*", // Handle root path (no path segments)
 		subjectmapper.SubjectPrefix + ".ws.ws.*.>",
-		"h8s.control.ws.conn.established",
-		"h8s.control.ws.conn.closed",
 	}
-	for _, pat := range patterns {
+	for _, pat := range dataPatterns {
 		var err error
 		if r.QueueGroup != "" {
 			_, err = r.nats.QueueSubscribe(pat, r.QueueGroup, r.handleMsg)
@@ -82,6 +81,19 @@ func (r *ReverseProxy) SubscribeAll(ctx context.Context) error {
 			_, err = r.nats.Subscribe(pat, r.handleMsg)
 		}
 		if err != nil {
+			return err
+		}
+	}
+
+	// Control subjects: NEVER use queue groups. Each h8srd instance needs
+	// its own backend WS connection, so every instance must receive every
+	// control message for the hosts it serves.
+	controlPatterns := []string{
+		"h8s.control.ws.conn.established.>",
+		"h8s.control.ws.conn.closed.>",
+	}
+	for _, pat := range controlPatterns {
+		if _, err := r.nats.Subscribe(pat, r.handleMsg); err != nil {
 			return err
 		}
 	}
@@ -98,16 +110,15 @@ func (r *ReverseProxy) SubscribeForHost(ctx context.Context, host string) error 
 	sm := subjectmapper.NewSubjectMap(req)
 	reversedHost := sm.ReversedHost()
 
-	patterns := []string{
+	// Data subjects — use queue groups for load balancing
+	dataPatterns := []string{
 		subjectmapper.SubjectPrefix + ".http.*." + reversedHost + ".>",
 		subjectmapper.SubjectPrefix + ".http.*." + reversedHost,
 		subjectmapper.SubjectPrefix + ".ws.ws." + reversedHost + ".>",
-		"h8s.control.ws.conn.established",
-		"h8s.control.ws.conn.closed",
 	}
 
 	var subs []*nats.Subscription
-	for _, pat := range patterns {
+	for _, pat := range dataPatterns {
 		var sub *nats.Subscription
 		var err error
 		if r.QueueGroup != "" {
@@ -125,8 +136,25 @@ func (r *ReverseProxy) SubscribeForHost(ctx context.Context, host string) error 
 		subs = append(subs, sub)
 	}
 
+	// Control subjects — NEVER use queue groups. Each h8srd instance needs
+	// its own backend WS connection, so every instance must receive every
+	// control message for the hosts it serves.
+	controlPatterns := []string{
+		"h8s.control.ws.conn.established." + reversedHost,
+		"h8s.control.ws.conn.closed." + reversedHost,
+	}
+	for _, pat := range controlPatterns {
+		sub, err := r.nats.Subscribe(pat, r.handleMsg)
+		if err != nil {
+			for _, s := range subs {
+				s.Unsubscribe()
+			}
+			return err
+		}
+		subs = append(subs, sub)
+	}
+
 	// Store subscriptions for later cleanup
-	// We append to existing subscriptions if any (though typically we expect one call per host)
 	if existing, ok := r.activeSubs.Load(host); ok {
 		current := existing.([]*nats.Subscription)
 		r.activeSubs.Store(host, append(current, subs...))
@@ -158,11 +186,13 @@ func (r *ReverseProxy) UnsubscribeForHost(host string) error {
 }
 
 func (r *ReverseProxy) handleMsg(msg *nats.Msg) {
-	if msg.Subject == "h8s.control.ws.conn.established" {
+	// Control messages: subjects now include .<reversed-host> suffix,
+	// so use prefix matching instead of exact equality.
+	if strings.HasPrefix(msg.Subject, "h8s.control.ws.conn.established") {
 		r.handleControlEstablished(msg)
 		return
 	}
-	if msg.Subject == "h8s.control.ws.conn.closed" {
+	if strings.HasPrefix(msg.Subject, "h8s.control.ws.conn.closed") {
 		r.handleControlClosed(msg)
 		return
 	}

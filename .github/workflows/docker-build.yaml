@@ -1,20 +1,24 @@
-# .github/workflows/docker-build.yml
+# .github/workflows/docker-build.yaml
 
 name: Build and Push to GHCR
 
 on:
   push:
-    paths:
-      - 'cmd/**'
-      - 'pkg/**'
-  pull_request:
+    tags:
+      - 'v*'
     paths:
       - 'cmd/**'
       - 'pkg/**'
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.ref_name }}
     strategy:
       matrix:
         app: [h8sd, h8srd]
@@ -33,21 +37,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata for tagging
-        id: meta
-        run: |
-          # Try to get exact tag
-          TAG=$(git describe --tags --exact-match 2>/dev/null || true)
-          if [ -n "$TAG" ]; then
-            echo "Found tag: $TAG"
-            echo "TAG=$TAG" >> $GITHUB_ENV
-          else
-            SHORT_SHA=$(git rev-parse --short HEAD)
-            echo "Using short SHA: $SHORT_SHA"
-            echo "TAG=$SHORT_SHA" >> $GITHUB_ENV
-          fi
-
-      - name: Build and push Docker image to GHCR
+      - name: Build and push Docker image to GHCR (stable tags)
+        if: ${{ !contains(github.ref_name, '-') }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -56,3 +47,13 @@ jobs:
           tags: |
             ghcr.io/mattilsynet/${{ matrix.app }}:${{ env.TAG }}
             ghcr.io/mattilsynet/${{ matrix.app }}:latest
+
+      - name: Build and push Docker image to GHCR (pre-release tags)
+        if: ${{ contains(github.ref_name, '-') }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.${{ matrix.app }}
+          push: true
+          tags: |
+            ghcr.io/mattilsynet/${{ matrix.app }}:${{ env.TAG }}
