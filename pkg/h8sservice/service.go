@@ -292,6 +292,10 @@ func (c *Service) Run() {
 	}()
 }
 
+// AddRequestHandler registers a handler for the given (host, path, method).
+// It MUST be called before Run(); the underlying map is not synchronized,
+// and Run() iterates it from background goroutines. Calling AddRequestHandler
+// concurrently with Run() is a data race.
 func (c *Service) AddRequestHandler(host string, path string, method string, scheme string, svc RequestServiceHandler) {
 	metadata := make(map[string]string)
 	metadata["host"] = host
@@ -308,7 +312,7 @@ func (c *Service) AddRequestHandler(host string, path string, method string, sch
 		},
 	}
 
-	c.requestServices[host+path] = micro.Config{
+	c.requestServices[method+"|"+host+path] = micro.Config{
 		Name:        nuid.New().Next(),
 		Metadata:    metadata,
 		Version:     "0.0.1",

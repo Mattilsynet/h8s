@@ -19,6 +19,14 @@ func (myTestHandler) Handle(r micro.Request) {
 	r.Respond([]byte("ok"))
 }
 
+type multiVerbHandler struct {
+	response string
+}
+
+func (m multiVerbHandler) Handle(r micro.Request) {
+	r.Respond([]byte(m.response))
+}
+
 func TestServiceDefaultsInterestPublishSubject(t *testing.T) {
 	ns := natstest.StartEmbeddedNATSServer(t)
 	defer ns.Shutdown()
@@ -137,4 +145,88 @@ func TestServiceShutdownPublishesUnregisterMessages(t *testing.T) {
 	msg2, err := unregSub.NextMsg(2 * time.Second)
 	require.NoError(t, err, "should receive second unregister message")
 	require.NotEmpty(t, msg2.Data)
+}
+
+func TestAddRequestHandlerMultipleVerbsSamePath(t *testing.T) {
+	ns := natstest.StartEmbeddedNATSServer(t)
+	defer ns.Shutdown()
+
+	nc, err := nats.Connect(ns.ClientURL())
+	require.NoError(t, err)
+	defer nc.Drain()
+
+	client := NewService(nc, WithInterestPublishSubject("h8s.control.interest"))
+
+	// Create distinct handlers for GET and POST that return different responses
+	getHandler := multiVerbHandler{response: "get-ok"}
+	postHandler := multiVerbHandler{response: "post-ok"}
+
+	host := "localhost"
+	path := "/api"
+
+	// Subscribe to unregister messages BEFORE starting the service
+	unregSub, err := nc.SubscribeSync(h8sproxy.H8SInterestControlSubject + ".unregister.localhost")
+	require.NoError(t, err)
+
+	// Register both GET and POST on the same host+path
+	client.AddRequestHandler(host, path, "GET", "http", getHandler)
+	client.AddRequestHandler(host, path, "POST", "http", postHandler)
+
+	// Verify both registrations are stored (map key now includes method)
+	require.Equal(t, 2, len(client.requestServices), "should have 2 registered services for same path with different methods")
+
+	// Start the service
+	ctx, cancel := context.WithCancel(context.Background())
+	client.ctx = ctx
+	go client.Run()
+	time.Sleep(500 * time.Millisecond) // allow service to register
+
+	// Test GET request
+	getSubject := subjectmapper.NewSubjectMap(subjectmapper.HTTPReqFromArgs("http", host, path, "GET")).PublishSubject()
+	t.Logf("GET subject: %s", getSubject)
+	getResp, err := nc.Request(getSubject, []byte("test"), 2*time.Second)
+	require.NoError(t, err, "GET request should succeed")
+	require.Equal(t, "get-ok", string(getResp.Data), "GET handler should return 'get-ok'")
+
+	// Test POST request
+	postSubject := subjectmapper.NewSubjectMap(subjectmapper.HTTPReqFromArgs("http", host, path, "POST")).PublishSubject()
+	t.Logf("POST subject: %s", postSubject)
+	postResp, err := nc.Request(postSubject, []byte("test"), 2*time.Second)
+	require.NoError(t, err, "POST request should succeed")
+	require.Equal(t, "post-ok", string(postResp.Data), "POST handler should return 'post-ok'")
+
+	// Shutdown should publish two unregister messages (one per verb)
+	cancel()
+	client.Shutdown()
+
+	// We expect 2 unregister messages for the two verbs on the same path
+	msg1, err := unregSub.NextMsg(2 * time.Second)
+	require.NoError(t, err, "should receive first unregister message")
+	require.NotEmpty(t, msg1.Data)
+
+	msg2, err := unregSub.NextMsg(2 * time.Second)
+	require.NoError(t, err, "should receive second unregister message")
+	require.NotEmpty(t, msg2.Data)
+}
+
+func TestAddRequestHandlerInvalidInputs(t *testing.T) {
+	ns := natstest.StartEmbeddedNATSServer(t)
+	defer ns.Shutdown()
+
+	nc, err := nats.Connect(ns.ClientURL())
+	require.NoError(t, err)
+	defer nc.Drain()
+
+	client := NewService(nc)
+
+	// Test empty method - should still register (no validation currently)
+	client.AddRequestHandler("localhost", "/test", "", "http", myTestHandler{})
+	// Test path not starting with / - should still register (no validation currently)
+	client.AddRequestHandler("localhost", "nopath", "GET", "http", myTestHandler{})
+	// Test invalid scheme - should still register (no validation currently)
+	client.AddRequestHandler("localhost", "/test2", "GET", "ftp", myTestHandler{})
+
+	// Note: Current implementation does not validate inputs, so all registrations succeed.
+	// This test documents the current behavior and can be extended when validation is added.
+	require.Equal(t, 3, len(client.requestServices), "all three handlers registered despite invalid inputs")
 }

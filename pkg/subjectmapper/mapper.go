@@ -272,7 +272,7 @@ func ReverseHostname(host string) string {
 func HTTPReqFromArgs(scheme string, host string, path string, method string) *http.Request {
 	// Publish a request matching the service's subject
 	req := &http.Request{
-		Method: "GET",
+		Method: method,
 		Host:   host,
 		URL: &url.URL{
 			Scheme: scheme,
