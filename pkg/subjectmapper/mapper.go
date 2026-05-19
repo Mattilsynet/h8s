@@ -18,7 +18,7 @@ import (
 const (
 	SubjectPrefix   = "h8s"
 	InboxPrefix     = "_INBOX.h8s"
-	WebScoketMethod = "ws"
+	WebSocketMethod = "ws"
 )
 
 type SubjectMapOption func(*SubjectMap)
@@ -44,7 +44,7 @@ func WithInboxPrefix(prefix string) SubjectMapOption {
 
 type SubjectMap struct {
 	Request *http.Request
-	// Request path from the HTTP request sanitized for used in NATS Subject
+	// Request path from the HTTP request sanitized for use in NATS Subject
 	Path string
 	// Reversed host for NATS Subject. IP's will not be reversed.
 	Host          string
@@ -117,20 +117,6 @@ func (sm *SubjectMap) processWebSocketURL(urlStr string) (*http.Request, error) 
 	return req, nil
 }
 
-func processRequestURL(urlStr string) (*http.Request, error) {
-	url, err := url.Parse(urlStr)
-	if err != nil {
-		return nil, err
-	}
-	req := &http.Request{
-		URL:    url,
-		Method: "GET",
-		Host:   url.Host,
-	}
-
-	return req, nil
-}
-
 func (sm *SubjectMap) PublishSubject() string {
 	subject := strings.Join([]string{
 		sm.SubjectPrefix,
@@ -144,10 +130,12 @@ func (sm *SubjectMap) PublishSubject() string {
 }
 
 func (sm *SubjectMap) WebSocketPublishSubject() string {
+	// Keep "ws" twice to preserve the standard subject layout:
+	// <prefix>.<scheme>.<method>.<host>.<path>
 	subject := strings.Join([]string{
 		sm.SubjectPrefix,
-		WebScoketMethod,
-		WebScoketMethod,
+		WebSocketMethod,
+		WebSocketMethod,
 		sm.Host,
 		sm.Path,
 	},
@@ -208,21 +196,6 @@ func (sm *SubjectMap) processHost(host string) {
 		parts[i], parts[j] = parts[j], parts[i]
 	}
 	sm.Host = strings.Join(parts, ".")
-}
-
-func isIP(host string) bool {
-	// Attempt to parse out a port if present (e.g., "127.0.0.1:8080", "[::1]:443").
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-
-	// For bracketed IPv6 addresses (with or without port), remove surrounding brackets.
-	host = strings.TrimPrefix(host, "[")
-	host = strings.TrimSuffix(host, "]")
-
-	// Now check if it's a valid IPv4 or IPv6 address.
-	ip := net.ParseIP(host)
-	return ip != nil
 }
 
 // processPath builds a NATS subject from an HTTP path.
