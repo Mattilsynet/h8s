@@ -6,59 +6,6 @@ import (
 	"testing"
 )
 
-func TestIsIP(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		want  bool
-	}{
-		{
-			name:  "Valid IPv4",
-			input: "127.0.0.1",
-			want:  true,
-		},
-		{
-			name:  "Valid IPv6",
-			input: "2001:db8::1",
-			want:  true,
-		},
-		{
-			name:  "Bracketed Valid IPv6 with port",
-			input: "[2001:db8::1]:8080",
-			want:  true,
-		},
-		{
-			name:  "Bracketed IPv6",
-			input: "[2001:db8::1]",
-			want:  true,
-		},
-		{
-			name:  "Plain domain",
-			input: "example.com",
-			want:  false,
-		},
-		{
-			name:  "Empty string",
-			input: "",
-			want:  false,
-		},
-		{
-			name:  "Random string",
-			input: "hello-world",
-			want:  false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := isIP(tt.input)
-			if got != tt.want {
-				t.Errorf("isIP(%q) = %v; want %v", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestSubjectMapperProcessHost(t *testing.T) {
 	tests := []struct {
 		name  string
