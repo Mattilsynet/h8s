@@ -311,6 +311,91 @@ func TestWebSocketProxy(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestWebSocketProxyRootPath(t *testing.T) {
+	// 1. Start a Mock WebSocket Backend
+	wsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := upgrader.Upgrade(w, r, nil)
+		require.NoError(t, err)
+		defer c.Close()
+		for {
+			mt, message, err := c.ReadMessage()
+			if err != nil {
+				break
+			}
+			// Echo back
+			err = c.WriteMessage(mt, message)
+			if err != nil {
+				break
+			}
+		}
+	})
+	wsServer := httptest.NewServer(wsHandler)
+	defer wsServer.Close()
+
+	// mock server URL is like http://127.0.0.1:45678
+	host := strings.TrimPrefix(wsServer.URL, "http://")
+
+	// 2. Start NATS and Reverse Proxy
+	ns := startEmbeddedNATS(t)
+	nc, err := nats.Connect(ns.ClientURL())
+	require.NoError(t, err)
+	defer nc.Drain()
+
+	rp := NewReverseProxy(nc)
+	err = rp.SubscribeAll(context.Background())
+	require.NoError(t, err)
+
+	// 3. Simulate "Connection Established" control message for root WS path
+	replySubject := "_INBOX.client-root"
+	publishSubject := "h8s.ws.ws.localhost"
+
+	reversedHost := subjectmapper.ReverseHostname(host)
+
+	msg := &nats.Msg{
+		Subject: "h8s.control.ws.conn.established." + reversedHost,
+		Reply:   replySubject,
+		Header:  nats.Header{},
+	}
+	msg.Header.Set("X-H8s-PublishSubject", publishSubject)
+	msg.Header.Set("Host", host)
+	msg.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	msg.Header.Set("Connection", "Upgrade")
+	msg.Header.Set("Upgrade", "websocket")
+	msg.Header.Set("Sec-WebSocket-Version", "13")
+
+	// Subscribe to what the proxy will output (messages from backend)
+	sub, err := nc.SubscribeSync(replySubject)
+	require.NoError(t, err)
+
+	err = nc.PublishMsg(msg)
+	require.NoError(t, err)
+
+	// Wait for connection to be established (async)
+	time.Sleep(100 * time.Millisecond)
+
+	// 4. Send Data: Client -> Proxy (Data Subject) -> Backend -> Proxy (Reply Subject) -> Client
+	dataMsg := &nats.Msg{
+		Subject: publishSubject,
+		Reply:   replySubject,
+		Data:    []byte("Hello Root WebSocket"),
+	}
+	err = nc.PublishMsg(dataMsg)
+	require.NoError(t, err)
+
+	// 5. Receive Echo
+	echoMsg, err := sub.NextMsg(2 * time.Second)
+	require.NoError(t, err)
+	require.Equal(t, "Hello Root WebSocket", string(echoMsg.Data))
+
+	// 6. Close Connection
+	closeMsg := &nats.Msg{
+		Subject: "h8s.control.ws.conn.closed." + reversedHost,
+		Reply:   replySubject,
+	}
+	err = nc.PublishMsg(closeMsg)
+	require.NoError(t, err)
+}
+
 func TestSSE(t *testing.T) {
 	// 1. Start a Mock SSE Backend
 	sseHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

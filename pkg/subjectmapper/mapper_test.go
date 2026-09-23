@@ -156,3 +156,44 @@ func TestSubjectMapperPublishSubject(t *testing.T) {
 		})
 	}
 }
+
+func TestWebSocketPublishSubject(t *testing.T) {
+	tests := []struct {
+		name string
+		host string
+		path string
+		want string
+	}{
+		{
+			name: "websocket root path has no trailing dot",
+			host: "example.com",
+			path: "/",
+			want: SubjectPrefix + ".ws.ws.com.example",
+		},
+		{
+			name: "websocket nested path",
+			host: "example.com",
+			path: "/ws/chat",
+			want: SubjectPrefix + ".ws.ws.com.example.ws.chat",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &http.Request{
+				Method: "GET",
+				Host:   tt.host,
+				URL: &url.URL{
+					Scheme: "ws",
+					Path:   tt.path,
+				},
+			}
+
+			sm := NewSubjectMap(req)
+			got := sm.WebSocketPublishSubject()
+			if got != tt.want {
+				t.Errorf("WebSocketPublishSubject() = %q; want %q", got, tt.want)
+			}
+		})
+	}
+}

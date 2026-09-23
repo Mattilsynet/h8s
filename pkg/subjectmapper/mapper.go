@@ -141,7 +141,7 @@ func (sm *SubjectMap) WebSocketPublishSubject() string {
 	},
 		".")
 
-	return subject
+	return strings.TrimSuffix(subject, ".")
 }
 
 func (sm *SubjectMap) InboxSubjectPrefix() string {

@@ -72,6 +72,7 @@ func (r *ReverseProxy) SubscribeAll(ctx context.Context) error {
 		subjectmapper.SubjectPrefix + ".http.*.*.>",
 		subjectmapper.SubjectPrefix + ".http.*.*", // Handle root path (no path segments)
 		subjectmapper.SubjectPrefix + ".ws.ws.*.>",
+		subjectmapper.SubjectPrefix + ".ws.ws.*", // Handle root path (no path segments)
 	}
 	for _, pat := range dataPatterns {
 		var err error
@@ -115,6 +116,7 @@ func (r *ReverseProxy) SubscribeForHost(ctx context.Context, host string) error 
 		subjectmapper.SubjectPrefix + ".http.*." + reversedHost + ".>",
 		subjectmapper.SubjectPrefix + ".http.*." + reversedHost,
 		subjectmapper.SubjectPrefix + ".ws.ws." + reversedHost + ".>",
+		subjectmapper.SubjectPrefix + ".ws.ws." + reversedHost,
 	}
 
 	var subs []*nats.Subscription

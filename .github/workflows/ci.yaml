@@ -23,15 +23,18 @@ jobs:
   checks:
     name: task ci checks
     runs-on: ubuntu-latest
+    env:
+      GOTOOLCHAIN: local
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+          cache-dependency-path: go.sum
 
       - name: Set up Task
         uses: go-task/setup-task@v1
@@ -52,15 +55,18 @@ jobs:
   race:
     name: race tests
     runs-on: ubuntu-latest
+    env:
+      GOTOOLCHAIN: local
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+          cache-dependency-path: go.sum
 
       - name: Run race tests
         run: go test -race ./...
