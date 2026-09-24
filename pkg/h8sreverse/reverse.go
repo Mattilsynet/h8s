@@ -48,6 +48,11 @@ func NewReverseProxy(nc *nats.Conn) *ReverseProxy {
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   30 * time.Second,
+			// A reverse proxy must return redirects to the browser instead of
+			// following them as an HTTP client.
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 		bufferPool: &sync.Pool{
 			New: func() interface{} {
@@ -222,7 +227,13 @@ func (r *ReverseProxy) handleMsg(msg *nats.Msg) {
 	var u *url.URL
 	var err error
 
-	hostHeader := msg.Header.Get("Host")
+	hostHeader := msg.Header.Get("X-H8s-Original-Host")
+	if hostHeader == "" {
+		hostHeader = msg.Header.Get("Host")
+	}
+	originalPath := msg.Header.Get("X-H8s-Original-Path")
+	originalQuery := msg.Header.Get("X-H8s-Original-Query")
+	originalProto := msg.Header.Get("X-H8s-Original-Proto")
 	ctx := context.Background()
 
 	if hostHeader != "" {
@@ -230,9 +241,7 @@ func (r *ReverseProxy) handleMsg(msg *nats.Msg) {
 		host = hostHeader
 
 		// Calculate host segments to find where path starts
-		req := &http.Request{Host: host}
-		sm := subjectmapper.NewSubjectMap(req)
-		reversedHost := sm.ReversedHost()
+		reversedHost := subjectmapper.ReverseHostname(host)
 		hostSegments := strings.Split(reversedHost, ".")
 		pathStartIndex := 3 + len(hostSegments)
 
@@ -309,7 +318,29 @@ func (r *ReverseProxy) handleMsg(msg *nats.Msg) {
 		urlStr = uCopy.String()
 	}
 
-	req, err := http.NewRequest(method, urlStr, bytes.NewReader(msg.Data))
+	requestURL, err := url.Parse(urlStr)
+	if err != nil {
+		slog.Error("parse request URL", "error", err)
+		r.publishError(msg, 502, "Invalid backend URL")
+		return
+	}
+	if originalPath != "" {
+		restoredPath, pathErr := url.PathUnescape(originalPath)
+		if pathErr != nil {
+			slog.Error("invalid original path", "error", pathErr)
+			r.publishError(msg, 400, "Invalid request path")
+			return
+		}
+		if u != nil && u.Path != "" {
+			restoredPath = joinURLPath(u.Path, restoredPath)
+			originalPath = joinURLPath(u.EscapedPath(), originalPath)
+		}
+		requestURL.Path = restoredPath
+		requestURL.RawPath = originalPath
+	}
+	requestURL.RawQuery = originalQuery
+
+	req, err := http.NewRequest(method, requestURL.String(), bytes.NewReader(msg.Data))
 	if err != nil {
 		slog.Error("new request", "error", err)
 		return
@@ -319,6 +350,19 @@ func (r *ReverseProxy) handleMsg(msg *nats.Msg) {
 			req.Header.Add(k, vv)
 		}
 	}
+	removeHopByHopHeaders(req.Header)
+	removeInternalHeaders(req.Header)
+	if hostHeader != "" {
+		req.Header.Set("X-Forwarded-Host", hostHeader)
+	}
+	// The backend may use virtual-host routing and must therefore receive the
+	// resolved backend authority as Host. Keep the public authority separately
+	// in X-Forwarded-Host.
+	req.Host = requestURL.Host
+	if originalProto == "" {
+		originalProto = scheme
+	}
+	req.Header.Set("X-Forwarded-Proto", originalProto)
 	resp, err := r.client.Do(req)
 	if err != nil {
 		slog.Error("http error", "error", err)
@@ -334,8 +378,10 @@ func (r *ReverseProxy) handleMsg(msg *nats.Msg) {
 	// 4. Publish subsequent chunks.
 	// 5. Publish empty message to signal EOF.
 
+	responseHeaders := resp.Header.Clone()
+	removeHopByHopHeaders(responseHeaders)
 	header := nats.Header{}
-	for k, v := range resp.Header {
+	for k, v := range responseHeaders {
 		for _, vv := range v {
 			header.Add(k, vv)
 		}
@@ -390,6 +436,55 @@ func (r *ReverseProxy) handleMsg(msg *nats.Msg) {
 	}
 }
 
+var hopByHopHeaders = []string{
+	"Connection",
+	"Proxy-Connection",
+	"Keep-Alive",
+	"Proxy-Authenticate",
+	"Proxy-Authorization",
+	"Te",
+	"Trailer",
+	"Transfer-Encoding",
+	"Upgrade",
+}
+
+func removeHopByHopHeaders(h http.Header) {
+	for _, value := range h.Values("Connection") {
+		for _, token := range strings.Split(value, ",") {
+			if token = strings.TrimSpace(token); token != "" {
+				h.Del(token)
+			}
+		}
+	}
+	for _, header := range hopByHopHeaders {
+		h.Del(header)
+	}
+}
+
+func removeInternalHeaders(h http.Header) {
+	for _, header := range []string{
+		"X-H8s-Original-Query",
+		"X-H8s-Original-Host",
+		"X-H8s-Original-Path",
+		"X-H8s-Original-Proto",
+		"X-H8s-ReplySubject",
+		"X-H8s-Connection-Close-Subject",
+	} {
+		h.Del(header)
+	}
+}
+
+func joinURLPath(basePath, requestPath string) string {
+	switch {
+	case strings.HasSuffix(basePath, "/") && strings.HasPrefix(requestPath, "/"):
+		return basePath + requestPath[1:]
+	case !strings.HasSuffix(basePath, "/") && !strings.HasPrefix(requestPath, "/"):
+		return basePath + "/" + requestPath
+	default:
+		return basePath + requestPath
+	}
+}
+
 func (r *ReverseProxy) publishError(msg *nats.Msg, code int, errStr string) {
 	respMsg := &nats.Msg{
 		Subject: msg.Reply,
@@ -403,7 +498,10 @@ func (r *ReverseProxy) publishError(msg *nats.Msg, code int, errStr string) {
 
 func (r *ReverseProxy) handleControlEstablished(msg *nats.Msg) {
 	// Filter by host if configured
-	hostHeader := msg.Header.Get("Host")
+	hostHeader := msg.Header.Get("X-H8s-Original-Host")
+	if hostHeader == "" {
+		hostHeader = msg.Header.Get("Host")
+	}
 	if r.FilterHost != "" && hostHeader != "" {
 		if !strings.EqualFold(hostHeader, r.FilterHost) {
 			return
@@ -446,7 +544,8 @@ func (r *ReverseProxy) handleControlEstablished(msg *nats.Msg) {
 		}
 	}
 
-	u := "ws://" + host + path
+	targetURL := &url.URL{Scheme: "ws", Host: host, Path: path}
+	var resolvedBackend *url.URL
 	if r.Resolver != nil {
 		ctx := context.Background()
 		resolved, err := r.Resolver.Resolve(ctx, host, path)
@@ -456,6 +555,7 @@ func (r *ReverseProxy) handleControlEstablished(msg *nats.Msg) {
 		}
 
 		if resolved != nil {
+			resolvedBackend = resolved
 			// Use configured backend
 			scheme := "ws"
 			if resolved.Scheme == "https" {
@@ -473,9 +573,23 @@ func (r *ReverseProxy) handleControlEstablished(msg *nats.Msg) {
 				}
 			}
 
-			u = scheme + "://" + resolved.Host + targetPath
+			targetURL = &url.URL{Scheme: scheme, Host: resolved.Host, Path: targetPath}
 		}
 	}
+	if originalPath := msg.Header.Get("X-H8s-Original-Path"); originalPath != "" {
+		restoredPath, err := url.PathUnescape(originalPath)
+		if err != nil {
+			slog.Error("handleControlEstablished: invalid original path", "error", err)
+			return
+		}
+		if resolvedBackend != nil && resolvedBackend.Path != "" {
+			restoredPath = joinURLPath(resolvedBackend.Path, restoredPath)
+			originalPath = joinURLPath(resolvedBackend.EscapedPath(), originalPath)
+		}
+		targetURL.Path = restoredPath
+		targetURL.RawPath = originalPath
+	}
+	targetURL.RawQuery = msg.Header.Get("X-H8s-Original-Query")
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
@@ -488,27 +602,36 @@ func (r *ReverseProxy) handleControlEstablished(msg *nats.Msg) {
 			continue
 		}
 		// Skip headers managed by Dial
-		if k == "Sec-Websocket-Key" || k == "Connection" || k == "Upgrade" || strings.HasPrefix(k, "Sec-Websocket-") {
+		if k == "Host" || k == "Sec-Websocket-Key" || k == "Connection" || k == "Upgrade" || strings.HasPrefix(k, "Sec-Websocket-") {
 			continue
 		}
 		// Case insensitive check for canonical keys if needed, but NATS headers match HTTP usually
-		if strings.EqualFold(k, "Sec-WebSocket-Key") || strings.EqualFold(k, "Connection") || strings.EqualFold(k, "Upgrade") || strings.HasPrefix(strings.ToLower(k), "sec-websocket-") {
+		if strings.EqualFold(k, "Host") || strings.EqualFold(k, "Sec-WebSocket-Key") || strings.EqualFold(k, "Connection") || strings.EqualFold(k, "Upgrade") || strings.HasPrefix(strings.ToLower(k), "sec-websocket-") {
 			continue
 		}
 		for _, vv := range v {
 			headers.Add(k, vv)
 		}
 	}
+	removeInternalHeaders(headers)
+	if hostHeader != "" {
+		headers.Set("X-Forwarded-Host", hostHeader)
+	}
+	originalProto := msg.Header.Get("X-H8s-Original-Proto")
+	if originalProto == "" {
+		originalProto = "http"
+	}
+	headers.Set("X-Forwarded-Proto", originalProto)
 
-	wsConn, _, err := dialer.Dial(u, headers)
+	wsConn, _, err := dialer.Dial(targetURL.String(), headers)
 	if err != nil {
-		slog.Error("handleControlEstablished: failed to dial backend", "url", u, "error", err)
+		slog.Error("handleControlEstablished: failed to dial backend", "url", targetURL.Redacted(), "error", err)
 		return
 	}
 
 	// Store connection mapping: ReplySubject -> *websocket.Conn
 	r.wsConns.Store(msg.Reply, wsConn)
-	slog.Info("handleControlEstablished: connected", "url", u, "reply", msg.Reply)
+	slog.Info("handleControlEstablished: connected", "url", targetURL.Redacted(), "reply", msg.Reply)
 
 	// Pump messages from backend -> NATS
 	go func() {

@@ -108,6 +108,83 @@ func TestRootPath(t *testing.T) {
 	require.Equal(t, "http://localhost/", req.URL.String())
 }
 
+type responseTransport struct {
+	req      *http.Request
+	response *http.Response
+}
+
+func (t *responseTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.req = req
+	return t.response, nil
+}
+
+func TestReverseProxyPreservesGrafanaRequestMetadata(t *testing.T) {
+	ns := startEmbeddedNATS(t)
+	nc, err := nats.Connect(ns.ClientURL())
+	require.NoError(t, err)
+	defer nc.Drain()
+
+	transport := &responseTransport{response: &http.Response{
+		StatusCode: http.StatusFound,
+		Status:     "302 Found",
+		Header: http.Header{
+			"Location":      []string{"https://grafana.example.com/grafana/login"},
+			"Connection":    []string{"keep-alive, X-Remove-Me"},
+			"Keep-Alive":    []string{"timeout=5"},
+			"X-Remove-Me":   []string{"yes"},
+			"X-Application": []string{"grafana"},
+		},
+		Body: io.NopCloser(strings.NewReader("redirect")),
+	}}
+	rp := NewReverseProxy(nc)
+	backendURL, err := url.Parse("http://internal.server.domain.local:8080")
+	require.NoError(t, err)
+	rp.Resolver = &StaticResolver{BackendURL: backendURL}
+	rp.client = &http.Client{Transport: transport, CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	require.NoError(t, rp.SubscribeAll(context.Background()))
+
+	msg := &nats.Msg{
+		Subject: "h8s.http.GET.com.example.grafana.grafana.public.build.app_js",
+		Reply:   "_INBOX.grafana",
+		Header: nats.Header{
+			"X-H8s-Original-Host":  []string{"grafana.example.com"},
+			"X-H8s-Original-Path":  []string{"/grafana/public/build/app%2Ejs/"},
+			"X-H8s-Original-Query": []string{"v=42&theme=dark"},
+			"X-H8s-Original-Proto": []string{"https"},
+			"User-Agent":           []string{"Grafana Browser"},
+			"Connection":           []string{"keep-alive, X-Remove-Me"},
+			"Keep-Alive":           []string{"timeout=5"},
+			"X-Remove-Me":          []string{"yes"},
+		},
+	}
+	replySub, err := nc.SubscribeSync(msg.Reply)
+	require.NoError(t, err)
+	require.NoError(t, nc.PublishMsg(msg))
+
+	reply, err := replySub.NextMsg(2 * time.Second)
+	require.NoError(t, err)
+	require.Equal(t, "302", reply.Header.Get("Status-Code"))
+	require.Equal(t, "https://grafana.example.com/grafana/login", reply.Header.Get("Location"))
+	require.Equal(t, "grafana", reply.Header.Get("X-Application"))
+	require.Empty(t, reply.Header.Get("Connection"))
+	require.Empty(t, reply.Header.Get("Keep-Alive"))
+	require.Empty(t, reply.Header.Get("X-Remove-Me"))
+
+	req := transport.req
+	require.NotNil(t, req)
+	require.Equal(t, "internal.server.domain.local:8080", req.Host)
+	require.Equal(t, "http://internal.server.domain.local:8080/grafana/public/build/app%2Ejs/?v=42&theme=dark", req.URL.String())
+	require.Equal(t, "grafana.example.com", req.Header.Get("X-Forwarded-Host"))
+	require.Equal(t, "https", req.Header.Get("X-Forwarded-Proto"))
+	require.Equal(t, "Grafana Browser", req.Header.Get("User-Agent"))
+	require.Empty(t, req.Header.Get("X-H8s-Original-Host"))
+	require.Empty(t, req.Header.Get("Connection"))
+	require.Empty(t, req.Header.Get("Keep-Alive"))
+	require.Empty(t, req.Header.Get("X-Remove-Me"))
+}
+
 // errorTransport returns an error on RoundTrip
 type errorTransport struct{}
 
@@ -222,7 +299,9 @@ var upgrader = websocket.Upgrader{}
 
 func TestWebSocketProxy(t *testing.T) {
 	// 1. Start a Mock WebSocket Backend
+	requestMetadata := make(chan *http.Request, 1)
 	wsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestMetadata <- r.Clone(r.Context())
 		c, err := upgrader.Upgrade(w, r, nil)
 		require.NoError(t, err)
 		defer c.Close()
@@ -244,7 +323,8 @@ func TestWebSocketProxy(t *testing.T) {
 	// Parse the port from the mock server URL
 	// mock server URL is like http://127.0.0.1:45678
 	// We need 127.0.0.1:45678 for the Host header
-	host := strings.TrimPrefix(wsServer.URL, "http://")
+	backendHost := strings.TrimPrefix(wsServer.URL, "http://")
+	publicHost := "showme.mattilsynet.io"
 
 	// 2. Start NATS and Reverse Proxy
 	ns := startEmbeddedNATS(t)
@@ -253,6 +333,9 @@ func TestWebSocketProxy(t *testing.T) {
 	defer nc.Drain()
 
 	rp := NewReverseProxy(nc)
+	backendURL, err := url.Parse(wsServer.URL)
+	require.NoError(t, err)
+	rp.Resolver = &StaticResolver{BackendURL: backendURL}
 	err = rp.SubscribeAll(context.Background())
 	require.NoError(t, err)
 
@@ -262,7 +345,7 @@ func TestWebSocketProxy(t *testing.T) {
 	publishSubject := "h8s.ws.ws.localhost.ws"
 
 	// Derive reversed host for the control subject (port is stripped)
-	reversedHost := subjectmapper.ReverseHostname(host)
+	reversedHost := subjectmapper.ReverseHostname(publicHost)
 
 	msg := &nats.Msg{
 		Subject: "h8s.control.ws.conn.established." + reversedHost,
@@ -270,7 +353,11 @@ func TestWebSocketProxy(t *testing.T) {
 		Header:  nats.Header{},
 	}
 	msg.Header.Set("X-H8s-PublishSubject", publishSubject)
-	msg.Header.Set("Host", host)
+	msg.Header.Set("Host", publicHost)
+	msg.Header.Set("X-H8s-Original-Host", publicHost)
+	msg.Header.Set("X-H8s-Original-Path", "/ws/")
+	msg.Header.Set("X-H8s-Original-Query", "token=abc")
+	msg.Header.Set("X-H8s-Original-Proto", "https")
 	msg.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
 	msg.Header.Set("Connection", "Upgrade")
 	msg.Header.Set("Upgrade", "websocket")
@@ -285,6 +372,17 @@ func TestWebSocketProxy(t *testing.T) {
 
 	// Wait for connection to be established (async)
 	time.Sleep(100 * time.Millisecond)
+	select {
+	case req := <-requestMetadata:
+		require.Equal(t, backendHost, req.Host)
+		require.Equal(t, "/ws/", req.URL.Path)
+		require.Equal(t, "token=abc", req.URL.RawQuery)
+		require.Equal(t, publicHost, req.Header.Get("X-Forwarded-Host"))
+		require.Equal(t, "https", req.Header.Get("X-Forwarded-Proto"))
+		require.Empty(t, req.Header.Get("X-H8s-Original-Host"))
+	case <-time.After(2 * time.Second):
+		t.Fatal("backend did not receive WebSocket handshake")
+	}
 
 	// 4. Send Data: Client -> Proxy (Data Subject) -> Backend -> Proxy (Reply Subject) -> Client
 	// Send "Hello" to the data subject

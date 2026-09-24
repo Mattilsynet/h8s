@@ -44,6 +44,9 @@ const (
 
 	H8SPublishSubjectHTTPHeaderName     = "X-H8s-PublishSubject"
 	H8SOriginalQueryHTTPHeaderName      = "X-H8s-Original-Query"
+	H8SOriginalHostHTTPHeaderName       = "X-H8s-Original-Host"
+	H8SOriginalPathHTTPHeaderName       = "X-H8s-Original-Path"
+	H8SOriginalProtoHTTPHeaderName      = "X-H8s-Original-Proto"
 	H8SReplySubjectHTTPHeaderName       = "X-H8s-ReplySubject"
 	H8SConnectionCloseSubjectHeaderName = "X-H8s-Connection-Close-Subject"
 )
@@ -576,9 +579,14 @@ func (h8s *H8Sproxy) handleWebSocket(res http.ResponseWriter, req *http.Request)
 	// in req.Host rather than req.Header. Control messages rely on this
 	// header to route to the correct host-scoped subscriptions.
 	wsHeaders := req.Header.Clone()
-	if req.Host != "" && wsHeaders.Get("Host") == "" {
+	if req.Host != "" {
 		wsHeaders.Set("Host", req.Host)
 	}
+	wsHeaders.Set(H8SOriginalHostHTTPHeaderName, req.Host)
+	wsHeaders.Set(H8SOriginalPathHTTPHeaderName, req.URL.EscapedPath())
+	wsHeaders.Set(H8SOriginalQueryHTTPHeaderName, req.URL.RawQuery)
+	wsHeaders.Set(H8SOriginalProtoHTTPHeaderName, originalRequestProto(req))
+	appendForwardedFor(wsHeaders, req.RemoteAddr)
 
 	wsConn := &WSConn{
 		Conn:             conn,
@@ -727,6 +735,7 @@ func httpRequestToNATSMessage(req *http.Request) *nats.Msg {
 			msg.Header.Add(key, v)
 		}
 	}
+	removeHopByHopHeaders(http.Header(msg.Header))
 
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
@@ -740,13 +749,70 @@ func httpRequestToNATSMessage(req *http.Request) *nats.Msg {
 	// does not do any direct NATS communication.
 	msg.Header.Add(H8SPublishSubjectHTTPHeaderName, msg.Subject)
 	// Propagate the original query string as a header
-	msg.Header.Add(H8SOriginalQueryHTTPHeaderName, req.URL.RawQuery)
+	msg.Header.Set(H8SOriginalQueryHTTPHeaderName, req.URL.RawQuery)
+	msg.Header.Set(H8SOriginalHostHTTPHeaderName, req.Host)
+	msg.Header.Set(H8SOriginalPathHTTPHeaderName, req.URL.EscapedPath())
+	msg.Header.Set(H8SOriginalProtoHTTPHeaderName, originalRequestProto(req))
+	// Host is not part of req.Header in Go, but h8srd needs it for routing and
+	// for reconstructing the request authority seen by the client.
+	msg.Header.Set("Host", req.Host)
+	appendForwardedFor(http.Header(msg.Header), req.RemoteAddr)
 	msg.Header.Add(H8SReplySubjectHTTPHeaderName, msg.Reply)
 	msg.Header.Add(
 		H8SConnectionCloseSubjectHeaderName,
 		fmt.Sprintf("%v.%v", H8SControlConnectionClosedSubjectPrefix, nuid.Next()))
 
 	return msg
+}
+
+var hopByHopHeaders = []string{
+	"Connection",
+	"Proxy-Connection",
+	"Keep-Alive",
+	"Proxy-Authenticate",
+	"Proxy-Authorization",
+	"Te",
+	"Trailer",
+	"Transfer-Encoding",
+	"Upgrade",
+}
+
+func removeHopByHopHeaders(h http.Header) {
+	for _, value := range h.Values("Connection") {
+		for _, token := range strings.Split(value, ",") {
+			if token = strings.TrimSpace(token); token != "" {
+				h.Del(token)
+			}
+		}
+	}
+	for _, header := range hopByHopHeaders {
+		h.Del(header)
+	}
+}
+
+func originalRequestProto(req *http.Request) string {
+	if proto := strings.TrimSpace(strings.Split(req.Header.Get("X-Forwarded-Proto"), ",")[0]); proto != "" {
+		return proto
+	}
+	if req.TLS != nil {
+		return "https"
+	}
+	return "http"
+}
+
+func appendForwardedFor(h http.Header, remoteAddr string) {
+	if remoteAddr == "" {
+		return
+	}
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	if prior := h.Get("X-Forwarded-For"); prior != "" {
+		h.Set("X-Forwarded-For", prior+", "+host)
+	} else {
+		h.Set("X-Forwarded-For", host)
+	}
 }
 
 // CopyHeadersOnce copies relevant headers from a NATS reply message
@@ -763,6 +829,10 @@ func copyHeadersOnce(res http.ResponseWriter, h nats.Header) {
 			statusCode = v
 		}
 	}
+
+	removeHopByHopHeaders(http.Header(h))
+	h.Del("Status")
+	h.Del("Status-Code")
 
 	// Make headers canonical and assign values
 	for k, vals := range h {

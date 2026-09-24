@@ -137,6 +137,49 @@ func TestHttpReqToNATS_RequestReply_HeaderPropagation(t *testing.T) {
 	}
 }
 
+func TestHTTPRequestToNATSMessagePreservesOriginalRequestMetadata(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "https://grafana.example.com/grafana/public/build/app%2Ejs/?v=42", nil)
+	req.Host = "grafana.example.com"
+	req.RemoteAddr = "192.0.2.10:54321"
+	req.Header.Set("X-Forwarded-For", "198.51.100.4")
+	req.Header.Set("Connection", "keep-alive, X-Remove-Me")
+	req.Header.Set("Keep-Alive", "timeout=5")
+	req.Header.Set("X-Remove-Me", "yes")
+
+	msg := httpRequestToNATSMessage(req)
+
+	require.Equal(t, "grafana.example.com", msg.Header.Get(H8SOriginalHostHTTPHeaderName))
+	require.Equal(t, "/grafana/public/build/app%2Ejs/", msg.Header.Get(H8SOriginalPathHTTPHeaderName))
+	require.Equal(t, "v=42", msg.Header.Get(H8SOriginalQueryHTTPHeaderName))
+	require.Equal(t, "https", msg.Header.Get(H8SOriginalProtoHTTPHeaderName))
+	require.Equal(t, "grafana.example.com", msg.Header.Get("Host"))
+	require.Equal(t, "198.51.100.4, 192.0.2.10", msg.Header.Get("X-Forwarded-For"))
+	require.Empty(t, msg.Header.Get("Connection"))
+	require.Empty(t, msg.Header.Get("Keep-Alive"))
+	require.Empty(t, msg.Header.Get("X-Remove-Me"))
+}
+
+func TestCopyHeadersOnceStripsHopByHopHeaders(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	headers := nats.Header{
+		"Status-Code":   []string{"302"},
+		"Location":      []string{"/login"},
+		"Connection":    []string{"keep-alive, X-Remove-Me"},
+		"Keep-Alive":    []string{"timeout=5"},
+		"X-Remove-Me":   []string{"yes"},
+		"X-Application": []string{"grafana"},
+	}
+
+	copyHeadersOnce(recorder, headers)
+
+	require.Equal(t, http.StatusFound, recorder.Code)
+	require.Equal(t, "/login", recorder.Header().Get("Location"))
+	require.Equal(t, "grafana", recorder.Header().Get("X-Application"))
+	require.Empty(t, recorder.Header().Get("Connection"))
+	require.Empty(t, recorder.Header().Get("Keep-Alive"))
+	require.Empty(t, recorder.Header().Get("X-Remove-Me"))
+}
+
 // TestHandleWebSocket_NATSRequestReply tests the WebSocket handler with NATS "request-reply"
 // Apologise for the horrid code
 func TestHandleWebSocket_NATSPubSubAndWS(t *testing.T) {
