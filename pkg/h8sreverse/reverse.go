@@ -614,6 +614,16 @@ func (r *ReverseProxy) handleControlEstablished(msg *nats.Msg) {
 		}
 	}
 	removeInternalHeaders(headers)
+	// The browser Origin identifies the public h8s endpoint, while the backend
+	// WebSocket handshake targets the resolved service. Rewrite it to the
+	// backend origin so standard same-origin checks compare matching hosts.
+	if headers.Get("Origin") != "" {
+		originScheme := "http"
+		if targetURL.Scheme == "wss" {
+			originScheme = "https"
+		}
+		headers.Set("Origin", (&url.URL{Scheme: originScheme, Host: targetURL.Host}).String())
+	}
 	if hostHeader != "" {
 		headers.Set("X-Forwarded-Host", hostHeader)
 	}

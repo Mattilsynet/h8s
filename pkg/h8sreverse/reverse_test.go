@@ -358,6 +358,7 @@ func TestWebSocketProxy(t *testing.T) {
 	msg.Header.Set("X-H8s-Original-Path", "/ws/")
 	msg.Header.Set("X-H8s-Original-Query", "token=abc")
 	msg.Header.Set("X-H8s-Original-Proto", "https")
+	msg.Header.Set("Origin", "https://"+publicHost)
 	msg.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
 	msg.Header.Set("Connection", "Upgrade")
 	msg.Header.Set("Upgrade", "websocket")
@@ -379,6 +380,7 @@ func TestWebSocketProxy(t *testing.T) {
 		require.Equal(t, "token=abc", req.URL.RawQuery)
 		require.Equal(t, publicHost, req.Header.Get("X-Forwarded-Host"))
 		require.Equal(t, "https", req.Header.Get("X-Forwarded-Proto"))
+		require.Equal(t, wsServer.URL, req.Header.Get("Origin"))
 		require.Empty(t, req.Header.Get("X-H8s-Original-Host"))
 	case <-time.After(2 * time.Second):
 		t.Fatal("backend did not receive WebSocket handshake")
