@@ -364,6 +364,11 @@ func normalizeHost(raw string) string {
 
 func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 	ctx := req.Context()
+	// Go keeps the request authority in req.Host rather than req.Header. Local
+	// listeners commonly receive it as "hostname:port", but h8s routes by
+	// hostname only. Rewrite it once here so HTTP and WebSocket messages carry
+	// the same port-free Host value throughout the tunnel.
+	req.Host = normalizeHost(req.Host)
 
 	if h8s.NaiveAuthorizationKey != "" {
 		if subtle.ConstantTimeCompare([]byte(req.Header.Get("Authorization")), []byte(h8s.NaiveAuthorizationKey)) != 1 {

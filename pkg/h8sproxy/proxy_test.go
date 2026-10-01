@@ -159,6 +159,46 @@ func TestHTTPRequestToNATSMessagePreservesOriginalRequestMetadata(t *testing.T) 
 	require.Empty(t, msg.Header.Get("X-Remove-Me"))
 }
 
+func TestHandlerStripsPortFromIncomingHost(t *testing.T) {
+	ns := startEmbeddedNATSServer(t)
+	nc, err := nats.Connect(ns.ClientURL())
+	require.NoError(t, err)
+	defer nc.Drain()
+
+	proxy := NewH8Sproxy(nc, WithPublishOnly())
+	request := httptest.NewRequest(http.MethodGet, "http://app.example.com:8080/", nil)
+	recorder := httptest.NewRecorder()
+
+	messageSub, err := nc.SubscribeSync("h8s.http.GET.com.example.app")
+	require.NoError(t, err)
+	require.NoError(t, nc.Flush())
+
+	proxy.Handler(recorder, request)
+
+	message, err := messageSub.NextMsg(2 * time.Second)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "app.example.com", request.Host)
+	require.Equal(t, "app.example.com", message.Header.Get("Host"))
+	require.Equal(t, "app.example.com", message.Header.Get(H8SOriginalHostHTTPHeaderName))
+}
+
+func TestNormalizeHost(t *testing.T) {
+	tests := map[string]string{
+		"app.example.com:8080": "app.example.com",
+		"app.example.com":      "app.example.com",
+		"[2001:db8::1]:8080":   "2001:db8::1",
+		"[2001:db8::1]":        "2001:db8::1",
+		"2001:db8::1":          "2001:db8::1",
+	}
+
+	for input, expected := range tests {
+		t.Run(input, func(t *testing.T) {
+			require.Equal(t, expected, normalizeHost(input))
+		})
+	}
+}
+
 func TestCopyHeadersOnceStripsHopByHopHeaders(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	headers := nats.Header{
