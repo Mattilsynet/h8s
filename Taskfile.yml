@@ -75,6 +75,13 @@ tasks:
       - build:h8srd
       - build:k8srd
 
+  devinstall:
+    desc: Build and install binaries into /usr/local/sbin
+    deps:
+      - build
+    cmds:
+      - sudo install -m 0755 h8sd h8srd /usr/local/sbin/
+
   ci:
     desc: Run deterministic CI checks (race as separate job)
     deps:
