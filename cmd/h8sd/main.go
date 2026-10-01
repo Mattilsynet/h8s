@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -31,6 +32,7 @@ type NATSConnectionOptions struct {
 
 var (
 	NATSOptions          NATSConnectionOptions
+	portFlag             = flag.String("port", getEnv("PORT", "8080"), "HTTP server port")
 	natsURLFlag          = flag.String("nats-url", "", "NATS server URL")
 	natsCredsFlag        = flag.String("nats-creds", "", "Path to NATS credentials file (optional)")
 	trackInterestFlag    = flag.Bool("track-interest", false, "Enable Interest Tracker for self configuration. (Will no longer accept arbitrary request when enabled.)")
@@ -46,6 +48,13 @@ var (
 	respChanBufferFlag   = flag.Int("resp-chan-buffer", 128, "Buffer size for per-request response channels")
 	wsSendBufferFlag     = flag.Int("ws-send-buffer", 1024, "Buffer size for per-WebSocket send channels")
 )
+
+func getEnv(key, fallback string) string {
+	if value, ok := os.LookupEnv(key); ok {
+		return value
+	}
+	return fallback
+}
 
 func NATSConnect(opts NATSConnectionOptions) (*nats.Conn, error) {
 	natsOpts := []nats.Option{
@@ -71,9 +80,9 @@ func init() {
 	handler := slog.NewJSONHandler(os.Stdout, nil)
 	logger := slog.New(handler)
 	slog.SetDefault(logger)
+}
 
-	flag.Parse()
-
+func configureNATSOptions() {
 	// Determine NATS URL
 	url := *natsURLFlag
 	if url == "" {
@@ -128,6 +137,9 @@ func enableOTEL() {
 }
 
 func main() {
+	flag.Parse()
+	configureNATSOptions()
+
 	enableOTEL()
 	if *otelEnabledFlag {
 		defer func() { _ = otel.MeterProvider.Shutdown(context.Background()) }()
@@ -248,9 +260,10 @@ func main() {
 	} else {
 		muxhandler = mux
 	}
-	slog.Info("Starting h8sd", "port", "8080")
+	listenAddress := net.JoinHostPort("0.0.0.0", *portFlag)
+	slog.Info("Starting h8sd", "address", listenAddress)
 
-	if err := http.ListenAndServe("0.0.0.0:8080", muxhandler); err != nil {
+	if err := http.ListenAndServe(listenAddress, muxhandler); err != nil {
 		slog.Error("Failed to start server", "error", err)
 		os.Exit(1)
 	}

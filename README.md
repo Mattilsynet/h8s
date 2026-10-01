@@ -155,6 +155,9 @@ graph TB
 # Basic usage
 ./h8sd --nats-url="nats://localhost:4222"
 
+# Bind to a different port (PORT=9090 is equivalent)
+./h8sd --port=9090 --nats-url="nats://localhost:4222"
+
 # With credentials and OpenTelemetry
 ./h8sd \
   --nats-url="nats://demo.nats.io:4222" \
@@ -172,6 +175,8 @@ graph TB
 ```
 
 `--allowed-origins` is optional; if omitted, WebSocket origins are not restricted.
+
+`h8sd` listens on port `8080` by default. Set `--port` or the `PORT` environment variable to change it; the command-line flag takes precedence.
 
 ### h8srd (Reverse Daemon)
 
