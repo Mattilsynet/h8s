@@ -172,11 +172,20 @@ graph TB
   --host-filters="example.com,api.example.com" \
   --allowed-origins="https://app.example.com,https://admin.example.com" \
   --request-timeout=5s
+
+# Static TLS termination (certificate must cover all served domains via SANs or a wildcard)
+./h8sd \
+  --nats-url="nats://localhost:4222" \
+  --tls-mode="static" \
+  --tls-cert="/run/secrets/tls.crt" \
+  --tls-key="/run/secrets/tls.key"
 ```
 
 `--allowed-origins` is optional; if omitted, WebSocket origins are not restricted.
 
 `h8sd` listens on port `8080` by default. Set `--port` or the `PORT` environment variable to change it; the command-line flag takes precedence.
+
+TLS is disabled by default (`--tls-mode="off"`). Set `--tls-mode="static"` with `--tls-cert` and `--tls-key` to terminate TLS. Both files are required in static mode, and the certificate must cover all served domains via SANs or a wildcard. Misconfigured TLS fails at startup.
 
 ### h8srd (Reverse Daemon)
 

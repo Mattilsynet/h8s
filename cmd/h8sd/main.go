@@ -47,6 +47,9 @@ var (
 	allowedOriginsFlag   = flag.String("allowed-origins", "", "Comma separated list of allowed WebSocket Origin values (default allows all origins)")
 	respChanBufferFlag   = flag.Int("resp-chan-buffer", 128, "Buffer size for per-request response channels")
 	wsSendBufferFlag     = flag.Int("ws-send-buffer", 1024, "Buffer size for per-WebSocket send channels")
+	tlsModeFlag          = flag.String("tls-mode", "off", `TLS mode: "off" or "static"`)
+	tlsCertFlag          = flag.String("tls-cert", "", "Path to the TLS certificate file (PEM)")
+	tlsKeyFlag           = flag.String("tls-key", "", "Path to the TLS private-key file (PEM)")
 )
 
 func getEnv(key, fallback string) string {
@@ -261,9 +264,13 @@ func main() {
 		muxhandler = mux
 	}
 	listenAddress := net.JoinHostPort("0.0.0.0", *portFlag)
-	slog.Info("Starting h8sd", "address", listenAddress)
 
-	if err := http.ListenAndServe(listenAddress, muxhandler); err != nil {
+	if err := h8s.ListenAndServe(muxhandler, h8s.ServerConfig{
+		Address:  listenAddress,
+		TLSMode:  h8s.TLSMode(*tlsModeFlag),
+		CertFile: *tlsCertFlag,
+		KeyFile:  *tlsKeyFlag,
+	}); err != nil {
 		slog.Error("Failed to start server", "error", err)
 		os.Exit(1)
 	}
