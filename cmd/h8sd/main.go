@@ -47,7 +47,7 @@ var (
 	allowedOriginsFlag   = flag.String("allowed-origins", "", "Comma separated list of allowed WebSocket Origin values (default allows all origins)")
 	respChanBufferFlag   = flag.Int("resp-chan-buffer", 128, "Buffer size for per-request response channels")
 	wsSendBufferFlag     = flag.Int("ws-send-buffer", 1024, "Buffer size for per-WebSocket send channels")
-	tlsModeFlag          = flag.String("tls-mode", "off", `TLS mode: "off" or "static"`)
+	tlsModeFlag          = flag.String("tls-mode", "off", `TLS mode: "off", "static" or "selfsigned"`)
 	tlsCertFlag          = flag.String("tls-cert", "", "Path to the TLS certificate file (PEM)")
 	tlsKeyFlag           = flag.String("tls-key", "", "Path to the TLS private-key file (PEM)")
 )
@@ -158,6 +158,17 @@ func main() {
 	// Construct slice of Options for h8sproxy factory based on command line flags.
 	var executionOptions []h8s.Option
 
+	// Parse host filters once; used for interest tracking, proxy options, and
+	// self-signed certificate SANs.
+	var hostFilters []string
+	if *hostFiltersFlag != "" {
+		for _, host := range strings.Split(*hostFiltersFlag, ",") {
+			if trimmed := strings.TrimSpace(host); trimmed != "" {
+				hostFilters = append(hostFilters, trimmed)
+			}
+		}
+	}
+
 	if *trackInterestFlag {
 		var itOptions []tracker.InterestTrackerOption
 		itOptions = append(itOptions, tracker.WithInterestSubject(h8s.H8SInterestControlSubject))
@@ -168,17 +179,8 @@ func main() {
 		// When host filters are configured, scope interest subscriptions
 		// to only the relevant hosts. This avoids processing interest
 		// messages for hosts this instance doesn't serve.
-		if *hostFiltersFlag != "" {
-			hosts := strings.Split(*hostFiltersFlag, ",")
-			var trimmedHosts []string
-			for _, host := range hosts {
-				if trimmed := strings.TrimSpace(host); trimmed != "" {
-					trimmedHosts = append(trimmedHosts, trimmed)
-				}
-			}
-			if len(trimmedHosts) > 0 {
-				itOptions = append(itOptions, tracker.WithHostFilters(trimmedHosts))
-			}
+		if len(hostFilters) > 0 {
+			itOptions = append(itOptions, tracker.WithHostFilters(hostFilters))
 		}
 
 		h8stracker := tracker.NewInterestTracker(
@@ -214,14 +216,9 @@ func main() {
 		executionOptions = append(executionOptions, h8s.WithMaxBodySize(*maxBodySizeFlag))
 	}
 
-	if *hostFiltersFlag != "" {
-		hosts := strings.Split(*hostFiltersFlag, ",")
-		for _, host := range hosts {
-			if trimmed := strings.TrimSpace(host); trimmed != "" {
-				slog.Info("Adding host filter", "host", trimmed)
-				executionOptions = append(executionOptions, h8s.WithHostFilter(trimmed))
-			}
-		}
+	for _, host := range hostFilters {
+		slog.Info("Adding host filter", "host", host)
+		executionOptions = append(executionOptions, h8s.WithHostFilter(host))
 	}
 
 	if *allowedOriginsFlag != "" {
@@ -266,10 +263,11 @@ func main() {
 	listenAddress := net.JoinHostPort("0.0.0.0", *portFlag)
 
 	if err := h8s.ListenAndServe(muxhandler, h8s.ServerConfig{
-		Address:  listenAddress,
-		TLSMode:  h8s.TLSMode(*tlsModeFlag),
-		CertFile: *tlsCertFlag,
-		KeyFile:  *tlsKeyFlag,
+		Address:     listenAddress,
+		TLSMode:     h8s.TLSMode(*tlsModeFlag),
+		CertFile:    *tlsCertFlag,
+		KeyFile:     *tlsKeyFlag,
+		HostFilters: hostFilters,
 	}); err != nil {
 		slog.Error("Failed to start server", "error", err)
 		os.Exit(1)

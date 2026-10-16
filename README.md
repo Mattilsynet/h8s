@@ -179,6 +179,13 @@ graph TB
   --tls-mode="static" \
   --tls-cert="/run/secrets/tls.crt" \
   --tls-key="/run/secrets/tls.key"
+
+# Self-signed TLS for local development (cert generated in memory at startup;
+# host filters are added as SANs)
+./h8sd \
+  --nats-url="nats://localhost:4222" \
+  --tls-mode="selfsigned" \
+  --host-filters="example.com,api.example.com"
 ```
 
 `--allowed-origins` is optional; if omitted, WebSocket origins are not restricted.
@@ -186,6 +193,8 @@ graph TB
 `h8sd` listens on port `8080` by default. Set `--port` or the `PORT` environment variable to change it; the command-line flag takes precedence.
 
 TLS is disabled by default (`--tls-mode="off"`). Set `--tls-mode="static"` with `--tls-cert` and `--tls-key` to terminate TLS. Both files are required in static mode, and the certificate must cover all served domains via SANs or a wildcard. Misconfigured TLS fails at startup.
+
+For local development, `--tls-mode="selfsigned"` generates a self-signed certificate in memory at startup (a fresh one each run). It is valid for `localhost`, `127.0.0.1`, `::1`, and any `--host-filters` hosts (ports are stripped). Clients must trust the certificate or skip verification; it is not suitable for production.
 
 ### h8srd (Reverse Daemon)
 
