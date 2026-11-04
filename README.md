@@ -250,6 +250,28 @@ export H8SRD_BACKEND_URL="http://localhost:8080"
 - Queue groups are used for **data subjects** (HTTP/WS frames) for load balancing.
 - WebSocket control subjects are intentionally not queue-grouped, so each relevant instance receives control messages.
 
+#### HTTP concurrency and long polls
+
+HTTP requests are dispatched concurrently, with at most 128 active requests per
+`ReverseProxy` across all its host/path subscriptions. A slot remains occupied
+until the backend response body finishes. Requests above the limit receive an
+immediate, finite HTTP 503 rather than spawning more workers or waiting behind
+a long poll. WebSocket data and control callbacks retain their existing ordered
+dispatch path.
+
+This matters for video and other long-polling applications: a NATS subscription
+invokes callbacks serially, so doing a complete HTTP request inside the callback
+would otherwise make different clients take turns. Responses still preserve
+their per-request ordering, first-message headers and empty streaming EOF.
+
+Backend resolvers and configuration must be safe for concurrent reads; configure
+the resolver/host/queue settings before subscribing. HTTP work inherits the
+context passed to `SubscribeAll` or `SubscribeForHost`, in addition to the
+30-second backend HTTP client timeout. Cancel that context when removing a route
+to abort its in-flight HTTP requests. Unsubscribing stops new requests but does
+not itself wait for the HTTP workers; NATS connection draining alone is not a
+worker-shutdown barrier.
+
 #### Troubleshooting
 
 - **`hostname flag is required` on startup**

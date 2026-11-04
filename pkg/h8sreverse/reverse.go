@@ -21,15 +21,18 @@ import (
 // It can subscribe to a filtered set of subjects based on the subjectmapper rules.
 
 type ReverseProxy struct {
-	nats       *nats.Conn
-	client     *http.Client
-	wsConns    sync.Map // map[string]*websocket.Conn (key is Reply subject)
-	activeSubs sync.Map // map[host][]*nats.Subscription
-	Resolver   BackendResolver
-	FilterHost string // Optional: Only handle requests for this host (original hostname)
-	QueueGroup string // Optional: NATS Queue Group for load balancing
-	bufferPool *sync.Pool
+	nats         *nats.Conn
+	client       *http.Client
+	wsConns      sync.Map // map[string]*websocket.Conn (key is Reply subject)
+	activeSubs   sync.Map // map[host][]*nats.Subscription
+	Resolver     BackendResolver
+	FilterHost   string // Optional: Only handle requests for this host (original hostname)
+	QueueGroup   string // Optional: NATS Queue Group for load balancing
+	bufferPool   *sync.Pool
+	httpRequests chan struct{} // Admission is bounded before a worker is started.
 }
+
+const defaultMaxConcurrentHTTPRequests = 128
 
 // NewReverseProxy creates a proxy with a default HTTP client.
 func NewReverseProxy(nc *nats.Conn) *ReverseProxy {
@@ -44,7 +47,8 @@ func NewReverseProxy(nc *nats.Conn) *ReverseProxy {
 	}
 
 	return &ReverseProxy{
-		nats: nc,
+		nats:         nc,
+		httpRequests: make(chan struct{}, defaultMaxConcurrentHTTPRequests),
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   30 * time.Second,
@@ -72,6 +76,7 @@ func NewReverseProxy(nc *nats.Conn) *ReverseProxy {
 // Paths: []string{"/api/users"} => subject "h8s.http.GET.h8s/..api/users".
 // This function builds the wildcard subjects accordingly.
 func (r *ReverseProxy) SubscribeAll(ctx context.Context) error {
+	handler := r.messageHandler(ctx)
 	// Data subjects use queue groups for load balancing
 	dataPatterns := []string{
 		subjectmapper.SubjectPrefix + ".http.*.*.>",
@@ -82,9 +87,9 @@ func (r *ReverseProxy) SubscribeAll(ctx context.Context) error {
 	for _, pat := range dataPatterns {
 		var err error
 		if r.QueueGroup != "" {
-			_, err = r.nats.QueueSubscribe(pat, r.QueueGroup, r.handleMsg)
+			_, err = r.nats.QueueSubscribe(pat, r.QueueGroup, handler)
 		} else {
-			_, err = r.nats.Subscribe(pat, r.handleMsg)
+			_, err = r.nats.Subscribe(pat, handler)
 		}
 		if err != nil {
 			return err
@@ -99,7 +104,7 @@ func (r *ReverseProxy) SubscribeAll(ctx context.Context) error {
 		"h8s.control.ws.conn.closed.>",
 	}
 	for _, pat := range controlPatterns {
-		if _, err := r.nats.Subscribe(pat, r.handleMsg); err != nil {
+		if _, err := r.nats.Subscribe(pat, handler); err != nil {
 			return err
 		}
 	}
@@ -108,6 +113,7 @@ func (r *ReverseProxy) SubscribeAll(ctx context.Context) error {
 
 // SubscribeForHost subscribes to subjects specific to a given hostname.
 func (r *ReverseProxy) SubscribeForHost(ctx context.Context, host string) error {
+	handler := r.messageHandler(ctx)
 	// Reverse the host using subjectmapper logic
 	req, err := http.NewRequest("GET", "http://"+host, nil)
 	if err != nil {
@@ -129,9 +135,9 @@ func (r *ReverseProxy) SubscribeForHost(ctx context.Context, host string) error 
 		var sub *nats.Subscription
 		var err error
 		if r.QueueGroup != "" {
-			sub, err = r.nats.QueueSubscribe(pat, r.QueueGroup, r.handleMsg)
+			sub, err = r.nats.QueueSubscribe(pat, r.QueueGroup, handler)
 		} else {
-			sub, err = r.nats.Subscribe(pat, r.handleMsg)
+			sub, err = r.nats.Subscribe(pat, handler)
 		}
 		if err != nil {
 			// Cleanup any successful subscriptions on failure
@@ -151,7 +157,7 @@ func (r *ReverseProxy) SubscribeForHost(ctx context.Context, host string) error 
 		"h8s.control.ws.conn.closed." + reversedHost,
 	}
 	for _, pat := range controlPatterns {
-		sub, err := r.nats.Subscribe(pat, r.handleMsg)
+		sub, err := r.nats.Subscribe(pat, handler)
 		if err != nil {
 			for _, s := range subs {
 				s.Unsubscribe()
@@ -192,7 +198,37 @@ func (r *ReverseProxy) UnsubscribeForHost(host string) error {
 	return lastErr
 }
 
-func (r *ReverseProxy) handleMsg(msg *nats.Msg) {
+// NATS invokes a subscription callback serially. Keeping an HTTP long poll or
+// streamed body in that callback makes every matching request wait behind it.
+// Dispatch HTTP only, with bounded admission shared across hosts/subscriptions;
+// WS control/data stays synchronous to retain its existing ordering.
+func (r *ReverseProxy) messageHandler(ctx context.Context) nats.MsgHandler {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return func(msg *nats.Msg) {
+		parts := strings.SplitN(msg.Subject, ".", 3)
+		if len(parts) < 2 || parts[1] != "http" {
+			r.handleMsg(ctx, msg)
+			return
+		}
+		if ctx.Err() != nil {
+			r.publishError(msg, http.StatusServiceUnavailable, "Reverse proxy is shutting down")
+			return
+		}
+		select {
+		case r.httpRequests <- struct{}{}:
+			go func() {
+				defer func() { <-r.httpRequests }()
+				r.handleMsg(ctx, msg)
+			}()
+		default:
+			r.publishError(msg, http.StatusServiceUnavailable, "Reverse proxy HTTP concurrency limit reached")
+		}
+	}
+}
+
+func (r *ReverseProxy) handleMsg(ctx context.Context, msg *nats.Msg) {
 	// Control messages: subjects now include .<reversed-host> suffix,
 	// so use prefix matching instead of exact equality.
 	if strings.HasPrefix(msg.Subject, "h8s.control.ws.conn.established") {
@@ -234,7 +270,6 @@ func (r *ReverseProxy) handleMsg(msg *nats.Msg) {
 	originalPath := msg.Header.Get("X-H8s-Original-Path")
 	originalQuery := msg.Header.Get("X-H8s-Original-Query")
 	originalProto := msg.Header.Get("X-H8s-Original-Proto")
-	ctx := context.Background()
 
 	if hostHeader != "" {
 		// Case 1: We have the Host header. This is the happy path.
@@ -340,7 +375,7 @@ func (r *ReverseProxy) handleMsg(msg *nats.Msg) {
 	}
 	requestURL.RawQuery = originalQuery
 
-	req, err := http.NewRequest(method, requestURL.String(), bytes.NewReader(msg.Data))
+	req, err := http.NewRequestWithContext(ctx, method, requestURL.String(), bytes.NewReader(msg.Data))
 	if err != nil {
 		slog.Error("new request", "error", err)
 		return
@@ -493,6 +528,9 @@ func (r *ReverseProxy) publishError(msg *nats.Msg, code int, errStr string) {
 	}
 	respMsg.Header.Set("Status", strconv.Itoa(code))
 	respMsg.Header.Set("Status-Code", strconv.Itoa(code))
+	// Error replies are finite single messages, not unterminated streams.
+	respMsg.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	respMsg.Header.Set("Content-Length", strconv.Itoa(len(respMsg.Data)))
 	r.nats.PublishMsg(respMsg)
 }
 
