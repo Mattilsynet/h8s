@@ -71,6 +71,46 @@ type WSConn struct {
 	// ResponderPublicKey is the interest-advertised key this WebSocket session
 	// seals client frames to. Empty means the session is plaintext.
 	ResponderPublicKey string
+
+	sendMu     sync.Mutex
+	sendClosed bool
+}
+
+// Enqueue adds a frame to the WebSocket writer queue. It never blocks and
+// returns false if the queue is full or the connection has been closed. The
+// mutex prevents a NATS callback from sending on Send after CloseSend.
+func (c *WSConn) Enqueue(data []byte) bool {
+	if c == nil {
+		return false
+	}
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if c.sendClosed || c.Send == nil {
+		return false
+	}
+	select {
+	case c.Send <- data:
+		return true
+	default:
+		return false
+	}
+}
+
+// CloseSend stops the writer and releases any blocked sender. It is safe to
+// call multiple times.
+func (c *WSConn) CloseSend() {
+	if c == nil {
+		return
+	}
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if c.sendClosed {
+		return
+	}
+	c.sendClosed = true
+	if c.Send != nil {
+		close(c.Send)
+	}
 }
 
 type WSPool struct {
@@ -720,7 +760,7 @@ func (h8s *H8Sproxy) handleWebSocketWithResolution(res http.ResponseWriter, req 
 		Headers:            wsHeaders,
 		ResponderPublicKey: resolution.PublicKey,
 	}
-	defer close(wsConn.Send)
+	defer wsConn.CloseSend()
 
 	// If the connection is not in the pool, do a handshake publish with 0 bytes.
 	if h8s.WSPool.Get(secKey) == nil {
@@ -743,11 +783,9 @@ func (h8s *H8Sproxy) handleWebSocketWithResolution(res http.ResponseWriter, req 
 			}
 			data = plain
 		}
-		select {
-		case wsConn.Send <- data:
-		default:
+		if !wsConn.Enqueue(data) {
 			h8s.NumberOfDroppedWSMessages.Add(context.Background(), 1)
-			slog.Warn("Send channel full, dropping message", "subject", msg.Subject)
+			slog.Warn("Send channel closed or full, dropping message", "subject", msg.Subject)
 		}
 	})
 	if err != nil {
