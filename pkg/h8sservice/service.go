@@ -3,16 +3,16 @@ package h8sservice
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/Mattilsynet/h8s/pkg/h8sproxy"
+	"github.com/Mattilsynet/h8s/pkg/interest"
+	"github.com/Mattilsynet/h8s/pkg/msgcrypto"
 	"github.com/Mattilsynet/h8s/pkg/subjectmapper"
 	"github.com/Mattilsynet/h8s/pkg/tracker"
 	"github.com/nats-io/nats.go"
@@ -44,6 +44,8 @@ type WebsocketHandler struct {
 	ServiceHandler      WebsocketServiceHandler
 	GetWSConns          ServiceWebsocketGetConnectionsFunc
 	GetWSConnsBySubject ServiceWebsocketGetConnectionsBySubjectFunc
+	GetWSConnKey        func(connSubject string) string
+	CryptoKey           *msgcrypto.Key
 }
 
 func NewWebsocketHandler(service WebsocketServiceHandler, host string, path string) *WebsocketHandler {
@@ -95,6 +97,18 @@ func (c *ServiceWebsocketConnections) GetConnections() []string {
 	return conns
 }
 
+// GetConnectionPublicKey returns the h8sd curve public key advertised on the
+// WebSocket control message for connSubject. Empty means the session is
+// plaintext.
+func (c *ServiceWebsocketConnections) GetConnectionPublicKey(connSubject string) string {
+	c.RLock()
+	defer c.RUnlock()
+	if msg, ok := c.conns[connSubject]; ok {
+		return msg.Header.Get(h8sproxy.H8SFromHeaderName)
+	}
+	return ""
+}
+
 func (c *ServiceWebsocketConnections) GetConnectionsBySubject(subject string) []string {
 	c.RLock()
 	defer c.RUnlock()
@@ -122,6 +136,13 @@ type Service struct {
 	websocketServices      map[string]*WebsocketHandler
 	websocketConnections   *ServiceWebsocketConnections
 	requestReplyServices   []micro.Service
+	// CryptoKey is the service-wide curve keypair. All replicas behind a
+	// queue group must configure the same seed so any replica can open any
+	// request. Nil means the service advertises no key and stays plaintext.
+	CryptoKey *msgcrypto.Key
+	// InstanceID is random per process and stable for its lifetime. It is
+	// required in every interest registration and unregistration.
+	InstanceID string
 }
 
 // Option is a function that can be used to configure the Client
@@ -140,6 +161,15 @@ func WithInterestPublishSubject(subject string) Option {
 	}
 }
 
+// WithCryptoKey enables encryption for this service. Every replica of the
+// same service (same queue group) must use the same seed. A service without a
+// key advertises no public key and remains plaintext.
+func WithCryptoKey(key *msgcrypto.Key) Option {
+	return func(c *Service) {
+		c.CryptoKey = key
+	}
+}
+
 // NewService creates a new h8s server
 func NewService(nc *nats.Conn, opts ...Option) *Service {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -153,6 +183,7 @@ func NewService(nc *nats.Conn, opts ...Option) *Service {
 		requestServices:        make(map[string]micro.Config),
 		websocketServices:      make(map[string]*WebsocketHandler),
 		websocketConnections:   NewWebSocketConnections(),
+		InstanceID:             nuid.New().Next(),
 	}
 
 	for _, opt := range opts {
@@ -179,7 +210,9 @@ func (c *Service) Run() {
 
 	// Set up subscribers for incoming data over websockets
 	for _, config := range c.websocketServices {
-		_, err := c.natsConn.QueueSubscribe(config.ReceiveSubject, config.QueueGroup, config.ServiceHandler.Read)
+		_, err := c.natsConn.QueueSubscribe(config.ReceiveSubject, config.QueueGroup, func(msg *nats.Msg) {
+			c.handleWebsocketFrame(config, msg)
+		})
 		if err != nil {
 			slog.Error("failed to subscribe to websocket subject", "error", err, "subject", config.ReceiveSubject)
 		}
@@ -231,57 +264,11 @@ func (c *Service) Run() {
 		<-c.ctx.Done()
 	}()
 
-	// Publish interests periodically
+	// Publish interests periodically. The publisher publishes once
+	// immediately, then every 5 seconds.
 	go func() {
 		defer c.wg.Done()
-		for {
-			select {
-			case <-c.ctx.Done():
-				return
-			default:
-			}
-
-			for _, config := range c.requestServices {
-				interest := tracker.Interest{
-					Host:   config.Metadata["host"],
-					Path:   config.Metadata["path"],
-					Method: config.Metadata["method"],
-				}
-				bytes, err := json.Marshal(interest)
-				if err != nil {
-					slog.Error("unable to marshal Interest", "error", err)
-					continue
-				}
-				// Publish to host-scoped interest subject: <prefix>.register.<reversed-host>
-				reversedHost := subjectmapper.ReverseHostname(interest.Host)
-				subject := c.InterestPublishSubject + ".register." + reversedHost
-				if err := c.natsConn.Publish(subject, bytes); err != nil {
-					slog.Error("unable to publish Interest", "error", err, "subject", subject)
-				}
-			}
-
-			for _, config := range c.websocketServices {
-				interest := tracker.Interest{
-					Host:   config.Host,
-					Path:   config.Path,
-					Method: "ws",
-				}
-				bytes, err := json.Marshal(interest)
-				if err != nil {
-					slog.Error("unable to marshal Interest", "error", err)
-					continue
-				}
-				// Publish to host-scoped interest subject: <prefix>.register.<reversed-host>
-				reversedHost := subjectmapper.ReverseHostname(interest.Host)
-				subject := c.InterestPublishSubject + ".register." + reversedHost
-				if err := c.natsConn.Publish(subject, bytes); err != nil {
-					slog.Error("unable to publish Interest", "error", err, "subject", subject)
-				}
-
-			}
-
-			time.Sleep(5 * time.Second) // Publish interest every 5 seconds
-		}
+		c.newInterestPublisher().Run(c.ctx)
 	}()
 
 	go func() {
@@ -312,6 +299,13 @@ func (c *Service) AddRequestHandler(host string, path string, method string, sch
 		},
 	}
 
+	handler := micro.HandlerFunc(svc.Handle)
+	if c.CryptoKey != nil {
+		handler = micro.HandlerFunc(func(request micro.Request) {
+			c.handleRequest(request, svc)
+		})
+	}
+
 	c.requestServices[method+"|"+host+path] = micro.Config{
 		Name:        nuid.New().Next(),
 		Metadata:    metadata,
@@ -319,7 +313,7 @@ func (c *Service) AddRequestHandler(host string, path string, method string, sch
 		Description: fmt.Sprintf("%s %s://%s%s", method, scheme, host, path),
 		Endpoint: &micro.EndpointConfig{
 			Subject:    subjectmapper.NewSubjectMap(req).PublishSubject(),
-			Handler:    micro.HandlerFunc(svc.Handle),
+			Handler:    handler,
 			QueueGroup: fmt.Sprintf("h8ss-%v-%v-%v", method, host, path),
 		},
 	}
@@ -330,65 +324,61 @@ func (c *Service) RegisterWebsocketHandler(handler *WebsocketHandler) {
 	handler.NatsConn = c.natsConn
 	handler.GetWSConns = c.websocketConnections.GetConnections
 	handler.GetWSConnsBySubject = c.websocketConnections.GetConnectionsBySubject
+	handler.GetWSConnKey = c.websocketConnections.GetConnectionPublicKey
+	handler.CryptoKey = c.CryptoKey
 	c.websocketServices[handler.ReceiveSubject] = handler
 }
 
 func (c *Service) Shutdown() {
 	slog.Info("shutting down service")
 
-	// Fire-and-forget: publish unregister messages for all interests before
-	// canceling context. This gives the tracker immediate removal instead of
-	// waiting for TTL eviction.
-	c.publishInterestUnregistrations()
-
+	// Stop the periodic publisher before unregistering. Otherwise a tick that
+	// races with shutdown can publish a register after the unregister and keep
+	// the route alive in the tracker until TTL eviction.
 	if c.cancel != nil {
 		c.cancel()
 	}
 	c.wg.Wait()
+
+	// Fire-and-forget: publish unregister messages for all interests. This
+	// gives the tracker immediate removal instead of waiting for TTL eviction.
+	c.newInterestPublisher().Unregister()
+
 	slog.Info("service shutdown complete")
 }
 
-// publishInterestUnregistrations publishes an unregister message for every
-// interest this service has been advertising. Best-effort / fire-and-forget:
-// if any publish fails we log and continue. The tracker TTL eviction is the
-// safety net.
-func (c *Service) publishInterestUnregistrations() {
+func (c *Service) newInterestPublisher() *interest.Publisher {
+	return &interest.Publisher{
+		NATSConn: c.natsConn,
+		Subject:  c.InterestPublishSubject,
+		Entries:  c.interests,
+	}
+}
+
+func (c *Service) interests() []tracker.Interest {
+	publicKey := ""
+	if c.CryptoKey != nil {
+		publicKey = c.CryptoKey.PublicKey()
+	}
+
+	interests := make([]tracker.Interest, 0, len(c.requestServices)+len(c.websocketServices))
 	for _, config := range c.requestServices {
-		interest := tracker.Interest{
-			Host:   config.Metadata["host"],
-			Path:   config.Metadata["path"],
-			Method: config.Metadata["method"],
-		}
-		bytes, err := json.Marshal(interest)
-		if err != nil {
-			slog.Error("unable to marshal Interest for unregister", "error", err)
-			continue
-		}
-		reversedHost := subjectmapper.ReverseHostname(interest.Host)
-		subject := c.InterestPublishSubject + ".unregister." + reversedHost
-		if err := c.natsConn.Publish(subject, bytes); err != nil {
-			slog.Error("unable to publish interest unregister", "error", err, "subject", subject)
-		}
+		interests = append(interests, tracker.Interest{
+			Host:       config.Metadata["host"],
+			Path:       config.Metadata["path"],
+			Method:     config.Metadata["method"],
+			PublicKey:  publicKey,
+			InstanceID: c.InstanceID,
+		})
 	}
-
 	for _, config := range c.websocketServices {
-		interest := tracker.Interest{
-			Host:   config.Host,
-			Path:   config.Path,
-			Method: "ws",
-		}
-		bytes, err := json.Marshal(interest)
-		if err != nil {
-			slog.Error("unable to marshal Interest for unregister", "error", err)
-			continue
-		}
-		reversedHost := subjectmapper.ReverseHostname(interest.Host)
-		subject := c.InterestPublishSubject + ".unregister." + reversedHost
-		if err := c.natsConn.Publish(subject, bytes); err != nil {
-			slog.Error("unable to publish interest unregister", "error", err, "subject", subject)
-		}
+		interests = append(interests, tracker.Interest{
+			Host:       config.Host,
+			Path:       config.Path,
+			Method:     "ws",
+			PublicKey:  publicKey,
+			InstanceID: c.InstanceID,
+		})
 	}
-
-	// Best-effort flush so unregister messages are sent before NATS conn drains.
-	_ = c.natsConn.FlushTimeout(500 * time.Millisecond)
+	return interests
 }

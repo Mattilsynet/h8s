@@ -281,6 +281,22 @@ worker-shutdown barrier.
 - **Unexpected backend routing**
   - Set `--backend-url`/`H8SRD_BACKEND_URL` explicitly; leaving it unset can cause fallback routing based on request host.
 
+## Message Encryption for Custom NATS Subscribers
+
+`h8sd` can seal request bodies to an `nkeys` curve public key advertised in a
+responder's interest, and responders can seal replies back to `h8sd`. The
+standalone `pkg/msgcrypto` package implements the primitive; it has no NATS or
+HTTP dependencies.
+
+If you are writing a subscriber outside `h8sservice`/`h8sreverse`, see
+[docs/crypto-subscribers.md](docs/crypto-subscribers.md) for the wire contract,
+interest registration, HTTP and WebSocket handling, response framing, and
+multi-replica guidance.
+
+> [!IMPORTANT]
+> `h8sd` must run with `--track-interest` to discover responder keys. Without
+> it, requests are forwarded without encryption.
+
 ## Task-based Project Automation
 
 This project ships with a root `Taskfile.yml` for repeatable local automation and CI consistency.

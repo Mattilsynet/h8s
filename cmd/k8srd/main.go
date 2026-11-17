@@ -9,6 +9,7 @@ import (
 
 	"github.com/Mattilsynet/h8s/pkg/h8sreverse"
 	"github.com/Mattilsynet/h8s/pkg/ingress"
+	"github.com/Mattilsynet/h8s/pkg/msgcrypto"
 	"github.com/nats-io/nats.go"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -17,8 +18,9 @@ import (
 )
 
 var (
-	natsURLFlag    = flag.String("nats-url", os.Getenv("NATS_URL"), "NATS server URL")
-	kubeconfigFlag = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
+	natsURLFlag        = flag.String("nats-url", os.Getenv("NATS_URL"), "NATS server URL")
+	kubeconfigFlag     = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
+	cryptoSeedFileFlag = flag.String("crypto-seed-file", os.Getenv("K8SRD_CRYPTO_SEED_FILE"), "Path to an nkeys curve seed (SX...). Required for crypto when running multiple replicas.")
 )
 
 func main() {
@@ -66,7 +68,19 @@ func main() {
 	}
 
 	// 3. Initialize Proxy with Dynamic Logic
-	proxy := h8sreverse.NewReverseProxy(nc)
+	var proxyOptions []h8sreverse.Option
+	if *cryptoSeedFileFlag != "" {
+		key, err := msgcrypto.FromSeedFile(*cryptoSeedFileFlag)
+		if err != nil {
+			slog.Error("Failed to load crypto seed", "error", err)
+			os.Exit(1)
+		}
+		defer key.Wipe()
+		proxyOptions = append(proxyOptions, h8sreverse.WithCryptoKey(key))
+		slog.Info("Using configured reverse proxy crypto key", "public_key", key.PublicKey())
+	}
+	proxy := h8sreverse.NewReverseProxy(nc, proxyOptions...)
+	defer proxy.CryptoKey.Wipe()
 
 	// 4. Initialize Ingress Controller (This links K8s -> Proxy)
 	ctrl := ingress.NewController(clientset, proxy)

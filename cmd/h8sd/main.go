@@ -12,6 +12,7 @@ import (
 	"time"
 
 	h8s "github.com/Mattilsynet/h8s/pkg/h8sproxy"
+	"github.com/Mattilsynet/h8s/pkg/msgcrypto"
 	"github.com/Mattilsynet/h8s/pkg/tracker"
 	"github.com/Mattilsynet/othell/pkg/othell"
 	"github.com/nats-io/nats.go"
@@ -35,7 +36,7 @@ var (
 	portFlag             = flag.String("port", getEnv("PORT", "8080"), "HTTP server port")
 	natsURLFlag          = flag.String("nats-url", "", "NATS server URL")
 	natsCredsFlag        = flag.String("nats-creds", "", "Path to NATS credentials file (optional)")
-	trackInterestFlag    = flag.Bool("track-interest", false, "Enable Interest Tracker for self configuration. (Will no longer accept arbitrary request when enabled.)")
+	trackInterestFlag    = flag.Bool("track-interest", false, "Track interest broadcasts and reject requests without a registered interest. Crypto discovery requires this; without it, requests are forwarded without encryption.")
 	otelEnabledFlag      = flag.Bool("otel-enabled", false, "Enable OpenTelemetry tracing and metrics")
 	otelEndpoint         = flag.String("otel-endpoint", "", "")
 	otel                 = &othell.Othell{}
@@ -50,6 +51,7 @@ var (
 	tlsModeFlag          = flag.String("tls-mode", "off", `TLS mode: "off", "static" or "selfsigned"`)
 	tlsCertFlag          = flag.String("tls-cert", "", "Path to the TLS certificate file (PEM)")
 	tlsKeyFlag           = flag.String("tls-key", "", "Path to the TLS private-key file (PEM)")
+	cryptoSeedFileFlag   = flag.String("crypto-seed-file", "", "Path to an nkeys curve seed (SX...) for a stable proxy identity (optional; default is an ephemeral per-proxy key)")
 )
 
 func getEnv(key, fallback string) string {
@@ -169,6 +171,9 @@ func main() {
 		}
 	}
 
+	// Interest tracking is optional. It is required for crypto discovery and
+	// for interest-only rejection; without it the proxy forwards requests
+	// without encryption. Publish-only mode remains usable either way.
 	if *trackInterestFlag {
 		var itOptions []tracker.InterestTrackerOption
 		itOptions = append(itOptions, tracker.WithInterestSubject(h8s.H8SInterestControlSubject))
@@ -187,8 +192,10 @@ func main() {
 			nc,
 			itOptions...)
 
-		executionOptions = append(executionOptions, h8s.WithInterestOnly())
 		executionOptions = append(executionOptions, h8s.WithInterestTracker(h8stracker))
+		executionOptions = append(executionOptions, h8s.WithInterestOnly())
+	} else {
+		slog.Info("interest tracking disabled; crypto discovery is disabled and requests will not be encrypted")
 	}
 
 	if *otelEnabledFlag {
@@ -247,9 +254,24 @@ func main() {
 		executionOptions = append(executionOptions, h8s.WithWSSendBuffer(*wsSendBufferFlag))
 	}
 
+	if *cryptoSeedFileFlag != "" {
+		key, err := msgcrypto.FromSeedFile(*cryptoSeedFileFlag)
+		if err != nil {
+			slog.Error("Failed to load crypto seed", "error", err)
+			os.Exit(1)
+		}
+		defer key.Wipe()
+		executionOptions = append(executionOptions, h8s.WithCryptoKey(key))
+		slog.Info("Using configured proxy crypto key", "public_key", key.PublicKey())
+		if !*trackInterestFlag {
+			slog.Warn("crypto seed is configured but interest tracking is disabled; requests will not be encrypted")
+		}
+	}
+
 	h8sproxy := h8s.NewH8Sproxy(
 		nc,
 		executionOptions...)
+	defer h8sproxy.CryptoKey.Wipe()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", h8sproxy.Handler)

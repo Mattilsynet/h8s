@@ -17,7 +17,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Mattilsynet/h8s/pkg/msgcrypto"
 	"github.com/Mattilsynet/h8s/pkg/subjectmapper"
+	"github.com/Mattilsynet/h8s/pkg/tracker"
 	"github.com/gorilla/websocket"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nuid"
@@ -49,6 +51,10 @@ const (
 	H8SOriginalProtoHTTPHeaderName      = "X-H8s-Original-Proto"
 	H8SReplySubjectHTTPHeaderName       = "X-H8s-ReplySubject"
 	H8SConnectionCloseSubjectHeaderName = "X-H8s-Connection-Close-Subject"
+	// H8SFromHeaderName carries the sender's curve public key ("X...") on a
+	// sealed request or WebSocket session. Its presence means the body is
+	// sealed with nkeys' xkv1 format.
+	H8SFromHeaderName = "X-H8s-From"
 )
 
 type WSConn struct {
@@ -62,6 +68,9 @@ type WSConn struct {
 	SubscribeSubject string
 	// Used to store headers from the HTTP request that sets up the WebSocket connection.
 	Headers http.Header
+	// ResponderPublicKey is the interest-advertised key this WebSocket session
+	// seals client frames to. Empty means the session is plaintext.
+	ResponderPublicKey string
 }
 
 type WSPool struct {
@@ -103,7 +112,15 @@ type Option func(*H8Sproxy)
 
 type H8SInterestTracker interface {
 	Run() error
-	ValidRequest(req http.Request) bool
+	Resolve(req http.Request) tracker.Resolution
+}
+
+// pendingRequest is the per-request response channel plus the responder key
+// pinned from the interest table at request time. A reply can never select a
+// different key for itself.
+type pendingRequest struct {
+	respChan           chan *nats.Msg
+	responderPublicKey string
 }
 
 type H8Sproxy struct {
@@ -138,6 +155,9 @@ type H8Sproxy struct {
 
 	// ProxyID is a unique identifier for this proxy instance, used for routing replies.
 	ProxyID string
+	// CryptoKey is this proxy's curve keypair. If nil, requests to keyed
+	// interests fail closed instead of being sent in plaintext.
+	CryptoKey *msgcrypto.Key
 	// upgrader handles WebSocket upgrade requests.
 	upgrader websocket.Upgrader
 	// pendingReqs tracks active requests waiting for responses.
@@ -173,6 +193,16 @@ func NewH8Sproxy(natsConn *nats.Conn, opts ...Option) *H8Sproxy {
 		opt(proxy)
 	}
 
+	if proxy.CryptoKey == nil {
+		key, err := msgcrypto.Generate()
+		if err != nil {
+			slog.Error("failed to generate per-proxy crypto key", "error", err)
+		} else {
+			proxy.CryptoKey = key
+			slog.Info("generated per-proxy crypto key", "public_key", key.PublicKey())
+		}
+	}
+
 	// SECURITY NOTE: CheckOrigin is permissive unless AllowedOrigins is set.
 	// Origin validation can be enforced by configuring AllowedOrigins.
 	proxy.upgrader = websocket.Upgrader{
@@ -190,8 +220,16 @@ func NewH8Sproxy(natsConn *nats.Conn, opts ...Option) *H8Sproxy {
 		},
 	}
 
-	if proxy.InterestOnly {
-		slog.Info("Starting with interest mode only")
+	if proxy.InterestOnly && proxy.InterestTracker == nil {
+		slog.Error("interest-only mode requires an interest tracker")
+		os.Exit(1)
+	}
+	if proxy.InterestTracker != nil {
+		if proxy.InterestOnly {
+			slog.Info("Starting with interest mode only")
+		} else {
+			slog.Info("Starting interest tracker for crypto discovery")
+		}
 		if err := proxy.InterestTracker.Run(); err != nil {
 			slog.Error("failed to start InterestTracker", "error", err)
 			os.Exit(1)
@@ -262,10 +300,10 @@ func (h8s *H8Sproxy) dispatch(msg *nats.Msg) {
 	}
 	reqID := parts[len(parts)-1]
 
-	if ch, ok := h8s.pendingReqs.Load(reqID); ok {
-		if respChan, ok := ch.(chan *nats.Msg); ok {
+	if value, ok := h8s.pendingReqs.Load(reqID); ok {
+		if pending, ok := value.(*pendingRequest); ok {
 			select {
-			case respChan <- msg:
+			case pending.respChan <- msg:
 			default:
 				h8s.NumberOfDroppedResponses.Add(context.Background(), 1)
 				slog.Warn("response channel full, dropping message", "reqID", reqID)
@@ -283,6 +321,15 @@ func WithInterestOnly() Option {
 func WithInterestTracker(tracker H8SInterestTracker) Option {
 	return func(h8s *H8Sproxy) {
 		h8s.InterestTracker = tracker
+	}
+}
+
+// WithCryptoKey sets the proxy's curve keypair. When omitted, NewH8Sproxy
+// generates an ephemeral per-proxy keypair. A stable/shared key is only needed
+// if reply routing must survive a proxy restart.
+func WithCryptoKey(key *msgcrypto.Key) Option {
+	return func(h8s *H8Sproxy) {
+		h8s.CryptoKey = key
 	}
 }
 
@@ -415,18 +462,39 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 		}
 	}
 
-	if h8s.InterestOnly {
-		if !h8s.InterestTracker.ValidRequest(*req) {
+	var resolution tracker.Resolution
+	if h8s.InterestTracker != nil {
+		resolution = h8s.InterestTracker.Resolve(*req)
+		if h8s.InterestOnly && !resolution.Found {
 			h8s.NumberOfDeniedRequests.Add(req.Context(), 1, metric.WithAttributes(attribute.String("reason", "interest_filter")))
 			res.Header().Set("Content-Type", "text/plain")
 			res.WriteHeader(http.StatusNotFound)
 			return
 		}
+		if resolution.Conflict {
+			slog.Error("interest conflict for request",
+				"host", req.Host, "path", req.URL.Path, "method", req.Method,
+				"instances", resolution.Instances)
+			h8s.NumberOfDeniedRequests.Add(req.Context(), 1, metric.WithAttributes(attribute.String("reason", "interest_conflict")))
+			http.Error(res, "Bad Gateway: conflicting interest keys", http.StatusBadGateway)
+			return
+		}
+	} else if h8s.InterestOnly {
+		h8s.NumberOfDeniedRequests.Add(req.Context(), 1, metric.WithAttributes(attribute.String("reason", "interest_tracker_missing")))
+		http.Error(res, "Internal Server Error: interest tracker not configured", http.StatusInternalServerError)
+		return
+	}
+
+	if resolution.PublicKey != "" && h8s.CryptoKey == nil {
+		slog.Error("cannot seal request: proxy crypto key is not initialized", "host", req.Host, "path", req.URL.Path)
+		h8s.NumberOfFailedRequests.Add(req.Context(), 1, metric.WithAttributes(attribute.String("reason", "crypto_key_missing")))
+		http.Error(res, "Bad Gateway", http.StatusBadGateway)
+		return
 	}
 
 	if strings.EqualFold(req.Header.Get("Connection"), "upgrade") &&
 		strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
-		h8s.handleWebSocket(res, req)
+		h8s.handleWebSocketWithResolution(res, req, resolution)
 		return
 	}
 
@@ -440,6 +508,18 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 	req.Body = http.MaxBytesReader(res, req.Body, h8s.MaxBodySize)
 
 	msg := httpRequestToNATSMessage(req)
+
+	if resolution.PublicKey != "" {
+		sealed, err := h8s.CryptoKey.Seal(msg.Data, resolution.PublicKey)
+		if err != nil {
+			slog.Error("failed to seal request body", "error", err, "host", req.Host, "path", req.URL.Path)
+			h8s.NumberOfFailedRequests.Add(req.Context(), 1, metric.WithAttributes(attribute.String("reason", "seal_failed")))
+			http.Error(res, "Bad Gateway", http.StatusBadGateway)
+			return
+		}
+		msg.Data = sealed
+		msg.Header.Set(H8SFromHeaderName, h8s.CryptoKey.PublicKey())
+	}
 
 	var (
 		wroteHeaders = false
@@ -467,9 +547,13 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Create and register the response channel
+	// Create and register the response channel. The responder key is pinned
+	// here from the interest resolution and is never taken from a reply.
 	respChan := make(chan *nats.Msg, h8s.RespChanBuffer)
-	h8s.pendingReqs.Store(reqID, respChan)
+	h8s.pendingReqs.Store(reqID, &pendingRequest{
+		respChan:           respChan,
+		responderPublicKey: resolution.PublicKey,
+	})
 	defer h8s.pendingReqs.Delete(reqID)
 
 	// Publish the request
@@ -513,6 +597,20 @@ loop:
 			}
 			timer.Reset(h8s.RequestTimeout)
 
+			if resolution.PublicKey != "" {
+				plain, err := h8s.CryptoKey.Open(rm.Data, resolution.PublicKey)
+				if err != nil {
+					slog.Error("failed to open response body", "error", err, "reqID", reqID)
+					reason = "decrypt_error"
+					if !wroteHeaders {
+						http.Error(res, "Bad Gateway: encrypted response could not be opened", http.StatusBadGateway)
+					}
+					return
+				}
+				rm.Data = plain
+			}
+			removeH8SHeaders(http.Header(rm.Header))
+
 			if !wroteHeaders {
 				copyHeadersOnce(res, rm.Header)
 				wroteHeaders = true
@@ -552,6 +650,23 @@ func (h8s *H8Sproxy) Dummy(res http.ResponseWriter, req *http.Request) {
 }
 
 func (h8s *H8Sproxy) handleWebSocket(res http.ResponseWriter, req *http.Request) {
+	var resolution tracker.Resolution
+	if h8s.InterestTracker != nil {
+		resolution = h8s.InterestTracker.Resolve(*req)
+	}
+	h8s.handleWebSocketWithResolution(res, req, resolution)
+}
+
+func (h8s *H8Sproxy) handleWebSocketWithResolution(res http.ResponseWriter, req *http.Request, resolution tracker.Resolution) {
+	if resolution.Conflict {
+		http.Error(res, "Bad Gateway: conflicting interest keys", http.StatusBadGateway)
+		return
+	}
+	if resolution.PublicKey != "" && h8s.CryptoKey == nil {
+		http.Error(res, "Bad Gateway", http.StatusBadGateway)
+		return
+	}
+
 	conn, err := h8s.upgrader.Upgrade(res, req, nil)
 	if err != nil {
 		slog.Error("WebSocket upgrade failed", "error", err)
@@ -584,8 +699,12 @@ func (h8s *H8Sproxy) handleWebSocket(res http.ResponseWriter, req *http.Request)
 	// in req.Host rather than req.Header. Control messages rely on this
 	// header to route to the correct host-scoped subscriptions.
 	wsHeaders := req.Header.Clone()
+	removeH8SHeaders(wsHeaders)
 	if req.Host != "" {
 		wsHeaders.Set("Host", req.Host)
+	}
+	if resolution.PublicKey != "" {
+		wsHeaders.Set(H8SFromHeaderName, h8s.CryptoKey.PublicKey())
 	}
 	wsHeaders.Set(H8SOriginalHostHTTPHeaderName, req.Host)
 	wsHeaders.Set(H8SOriginalPathHTTPHeaderName, req.URL.EscapedPath())
@@ -594,11 +713,12 @@ func (h8s *H8Sproxy) handleWebSocket(res http.ResponseWriter, req *http.Request)
 	appendForwardedFor(wsHeaders, req.RemoteAddr)
 
 	wsConn := &WSConn{
-		Conn:             conn,
-		Send:             make(chan []byte, h8s.WSSendBuffer),
-		PublishSubject:   sm.WebSocketPublishSubject(),
-		SubscribeSubject: subscribeSubject,
-		Headers:          wsHeaders,
+		Conn:               conn,
+		Send:               make(chan []byte, h8s.WSSendBuffer),
+		PublishSubject:     sm.WebSocketPublishSubject(),
+		SubscribeSubject:   subscribeSubject,
+		Headers:            wsHeaders,
+		ResponderPublicKey: resolution.PublicKey,
 	}
 	defer close(wsConn.Send)
 
@@ -614,8 +734,17 @@ func (h8s *H8Sproxy) handleWebSocket(res http.ResponseWriter, req *http.Request)
 
 	// Subscribe to per-client reply subject, get data from the backend, and send to client.
 	sub, err := h8s.NATSConn.Subscribe(subscribeSubject, func(msg *nats.Msg) {
+		data := msg.Data
+		if wsConn.ResponderPublicKey != "" {
+			plain, err := h8s.CryptoKey.Open(data, wsConn.ResponderPublicKey)
+			if err != nil {
+				slog.Error("failed to open WebSocket frame", "error", err, "subject", msg.Subject)
+				return
+			}
+			data = plain
+		}
 		select {
-		case wsConn.Send <- msg.Data:
+		case wsConn.Send <- data:
 		default:
 			h8s.NumberOfDroppedWSMessages.Add(context.Background(), 1)
 			slog.Warn("Send channel full, dropping message", "subject", msg.Subject)
@@ -648,10 +777,19 @@ func (h8s *H8Sproxy) handleWebSocket(res http.ResponseWriter, req *http.Request)
 			h8s.cmConnectionClosed(wsConn.Headers.Get("Sec-WebSocket-Key"))
 			break
 		}
+		data := msg
+		if wsConn.ResponderPublicKey != "" {
+			sealed, err := h8s.CryptoKey.Seal(data, wsConn.ResponderPublicKey)
+			if err != nil {
+				slog.Error("failed to seal WebSocket frame", "error", err, "subject", wsConn.PublishSubject)
+				break
+			}
+			data = sealed
+		}
 		natsMsg := &nats.Msg{
 			Subject: wsConn.PublishSubject,
 			Reply:   wsConn.SubscribeSubject,
-			Data:    msg,
+			Data:    data,
 			Header:  nats.Header{},
 		}
 
@@ -734,8 +872,12 @@ func httpRequestToNATSMessage(req *http.Request) *nats.Msg {
 	sm := subjectmapper.NewSubjectMap(req)
 	msg := nats.NewMsg(sm.PublishSubject())
 	msg.Reply = fmt.Sprintf("%v.%v", sm.InboxSubjectPrefix(), nuid.Next())
-	// Put all headers in the NATS message
+	// Put all headers in the NATS message. Client-supplied X-H8s-* headers
+	// are internal control data and must never be trusted or forwarded.
 	for key, value := range req.Header {
+		if isH8SHeader(key) {
+			continue
+		}
 		for _, v := range value {
 			msg.Header.Add(key, v)
 		}
@@ -792,6 +934,20 @@ func removeHopByHopHeaders(h http.Header) {
 	}
 	for _, header := range hopByHopHeaders {
 		h.Del(header)
+	}
+}
+
+func isH8SHeader(key string) bool {
+	return strings.HasPrefix(strings.ToLower(key), "x-h8s-")
+}
+
+// removeH8SHeaders strips all internal control headers, including duplicates
+// and differently-cased variants, before headers cross a trust boundary.
+func removeH8SHeaders(h http.Header) {
+	for key := range h {
+		if isH8SHeader(key) {
+			h.Del(key)
+		}
 	}
 }
 

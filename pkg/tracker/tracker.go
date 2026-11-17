@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,7 +16,21 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// InterestTracker tracks hosts and their discovered WebSocket and request/reply connection handlers.
+const (
+	// interestTTL is deliberately much larger than the 5s publish interval so
+	// a single missed publish does not evict a live instance.
+	interestTTL = time.Minute
+
+	// legacyInstanceID is assigned to registrations from publishers that
+	// predate the InstanceID field. All legacy replicas of one route collapse
+	// into this single entry, which matches the old route-level semantics.
+	// The value contains characters outside the NUID alphabet to avoid a
+	// collision with a real generated instance ID.
+	legacyInstanceID = "<legacy>"
+)
+
+// InterestTracker tracks hosts and their discovered WebSocket and
+// request/reply connection handlers.
 type InterestTracker struct {
 	nc                *nats.Conn
 	interestSubject   string
@@ -25,20 +40,52 @@ type InterestTracker struct {
 	NumberOfInterests metric.Int64Gauge
 }
 
+// routeKey identifies a route. Struct fields avoid the ambiguity of a
+// concatenated host:path:method key (ports, IPv6 literals, and paths
+// containing ':' are all valid).
+type routeKey struct {
+	Host   string
+	Path   string
+	Method string
+}
+
+type instanceInterest struct {
+	interest Interest
+	seen     time.Time
+}
+
+// Interests stores a route as a set of live instances. Multiple replicas of
+// the same service may advertise the same route; each must be added and
+// removed independently.
 type Interests struct {
 	sync.RWMutex
-	InterestMap  map[string]*Interest
-	InterestSeen map[string]time.Time
+	routes map[routeKey]map[string]*instanceInterest
 }
 
+// Interest is the wire representation advertised by a responder.
 type Interest struct {
-	Host   string `json:"host"`
-	Path   string `json:"path"`
-	Method string `json:"method"`
+	Host       string `json:"host"`
+	Path       string `json:"path"`
+	Method     string `json:"method"`
+	PublicKey  string `json:"pub,omitempty"`
+	InstanceID string `json:"instance"`
 }
 
+// Id returns the route identity. It is retained for logs and tests; internal
+// matching uses routeKey so delimiters in host/path cannot collide.
 func (i *Interest) Id() string {
 	return fmt.Sprintf("%s:%s:%s", i.Host, i.Path, i.Method)
+}
+
+// Resolution is the result of resolving an HTTP request against the interest
+// table. Conflict means the winning route has more than one distinct non-empty
+// public key, or a mix of empty and non-empty keys. Callers must fail closed
+// on conflict rather than falling back to plaintext.
+type Resolution struct {
+	Found     bool
+	PublicKey string
+	Conflict  bool
+	Instances int
 }
 
 type InterestTrackerOption func(*InterestTracker)
@@ -47,8 +94,7 @@ func NewInterestTracker(nc *nats.Conn, opts ...InterestTrackerOption) *InterestT
 	tracker := &InterestTracker{
 		nc: nc,
 		Interests: &Interests{
-			InterestMap:  make(map[string]*Interest),
-			InterestSeen: make(map[string]time.Time),
+			routes: make(map[routeKey]map[string]*instanceInterest),
 		},
 		OTELMeter: otel.GetMeterProvider().Meter("interest-tracker"),
 	}
@@ -92,8 +138,8 @@ func WithOTELMeter(meter metric.Meter) InterestTrackerOption {
 }
 
 func (it *InterestTracker) Run() error {
-	// Runs eviction of stale interests as a goroutine
-	go it.Interests.RunEvictions()
+	// Runs eviction of stale instances as a goroutine.
+	go it.runEvictions()
 
 	registerHandler := func(msg *nats.Msg) {
 		interest := &Interest{}
@@ -101,13 +147,8 @@ func (it *InterestTracker) Run() error {
 			slog.Error("error unmarshalling interest payload", "error", err)
 			return
 		}
-		changed := it.Interests.Add(interest)
-		// Update gauge when number of registered Interests change.
-		if changed {
-			it.Interests.RLock()
-			count := int64(len(it.Interests.InterestMap))
-			it.Interests.RUnlock()
-			it.NumberOfInterests.Record(context.Background(), count)
+		if it.Interests.Add(interest) {
+			it.recordRouteCount()
 		}
 	}
 
@@ -117,12 +158,8 @@ func (it *InterestTracker) Run() error {
 			slog.Error("error unmarshalling interest unregister payload", "error", err)
 			return
 		}
-		removed := it.Interests.Remove(interest)
-		if removed {
-			it.Interests.RLock()
-			count := int64(len(it.Interests.InterestMap))
-			it.Interests.RUnlock()
-			it.NumberOfInterests.Record(context.Background(), count)
+		if it.Interests.Remove(interest) {
+			it.recordRouteCount()
 		}
 	}
 
@@ -160,77 +197,231 @@ func (it *InterestTracker) Run() error {
 	return nil
 }
 
-func (it *InterestTracker) ValidRequest(req http.Request) bool {
-	it.Interests.RLock()
-	defer it.Interests.RUnlock()
-
-	tempInterest := &Interest{
-		req.Host,
-		req.URL.Path,
-		req.Method,
+func (it *InterestTracker) recordRouteCount() {
+	if it.NumberOfInterests == nil {
+		return
 	}
-	if interest, exists := it.Interests.InterestMap[tempInterest.Id()]; exists && interest != nil {
-		return true
-	}
-	slog.Debug("no registered interest for request", "interest", tempInterest)
-	return false
+	it.NumberOfInterests.Record(context.Background(), int64(it.Interests.RouteCount()))
 }
 
-// Add registers or refreshes an interest. Returns true if this is a newly
-// added interest (not just a timestamp refresh), enabling callers to update
-// gauges only when the map size actually changes.
-func (i *Interests) Add(interest *Interest) bool {
-	id := interest.Id()
-	i.Lock()
-	_, existed := i.InterestMap[id]
-	i.InterestMap[id] = interest
-	i.InterestSeen[id] = time.Now()
-	i.Unlock()
-	if !existed {
-		slog.Info("Added new interest", "interest", interest)
+func (it *InterestTracker) runEvictions() {
+	// Initial delay before starting evictions.
+	time.Sleep(5 * time.Second)
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		if it.Interests.EvictStale(time.Now()) > 0 {
+			it.recordRouteCount()
+		}
 	}
-	return !existed
+}
+
+// Resolve resolves an HTTP request against the winning interest tier. A
+// WebSocket upgrade is advertised with method "ws", not the handshake's GET.
+func (it *InterestTracker) Resolve(req http.Request) Resolution {
+	method := req.Method
+	if strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
+		method = subjectmapper.WebSocketMethod
+	}
+	return it.Interests.Resolve(req.Host, req.URL.Path, method)
+}
+
+// ResolveRoute resolves a route against the winning interest tier.
+func (it *InterestTracker) ResolveRoute(host, path, method string) Resolution {
+	return it.Interests.Resolve(host, path, method)
+}
+
+// ValidRequest reports whether the request matches a registered interest.
+// It is retained for callers that only need the boolean form.
+func (it *InterestTracker) ValidRequest(req http.Request) bool {
+	return it.Resolve(req).Found
+}
+
+func effectiveInstanceID(interest *Interest) string {
+	if interest == nil || interest.InstanceID == "" {
+		return legacyInstanceID
+	}
+	return interest.InstanceID
+}
+
+// Add registers or refreshes an instance. It returns true only when a new
+// route is created, so callers update route gauges only when the route count
+// actually changes. Registrations without an InstanceID use legacyInstanceID
+// so pre-crypto publishers can still register as plaintext routes.
+func (i *Interests) Add(interest *Interest) bool {
+	if interest == nil {
+		return false
+	}
+
+	key := routeKey{Host: interest.Host, Path: interest.Path, Method: interest.Method}
+	copyInterest := *interest
+	copyInterest.InstanceID = effectiveInstanceID(interest)
+	now := time.Now()
+
+	i.Lock()
+	instances, routeExisted := i.routes[key]
+	if instances == nil {
+		instances = make(map[string]*instanceInterest)
+		i.routes[key] = instances
+	}
+	_, instanceExisted := instances[copyInterest.InstanceID]
+	instances[copyInterest.InstanceID] = &instanceInterest{interest: copyInterest, seen: now}
+	i.Unlock()
+
+	if !routeExisted {
+		slog.Info("Added new interest route", "interest", &copyInterest)
+	} else if !instanceExisted {
+		slog.Debug("Added interest instance", "interest", &copyInterest)
+	}
+	return !routeExisted
+}
+
+// EvictStale removes instances whose last registration is older than the TTL.
+// It returns the number of routes removed, which is what the route gauge
+// tracks.
+func (i *Interests) EvictStale(now time.Time) int {
+	i.Lock()
+	defer i.Unlock()
+	removedRoutes := 0
+	for key, instances := range i.routes {
+		for instanceID, entry := range instances {
+			if now.Sub(entry.seen) > interestTTL {
+				delete(instances, instanceID)
+			}
+		}
+		if len(instances) == 0 {
+			delete(i.routes, key)
+			removedRoutes++
+		}
+	}
+	return removedRoutes
 }
 
 func (i *Interests) RunEvictions() {
 	for {
 		i.RLock()
-		slog.Debug("Current interests", "interests", i.InterestMap)
+		slog.Debug("Current interests", "routes", len(i.routes))
 		i.RUnlock()
-		time.Sleep(5 * time.Second) // Initial delay before starting evictions
+		time.Sleep(5 * time.Second)
 
-		now := time.Now()
-		i.Lock()
-		for id, ts := range i.InterestSeen {
-			if now.Sub(ts) > 1*time.Minute {
-				delete(i.InterestMap, id)
-				delete(i.InterestSeen, id)
-			}
-		}
-		i.Unlock()
+		i.EvictStale(time.Now())
 	}
 }
 
-func (i *Interests) evict(id string) {
-	i.Lock()
-	delete(i.InterestMap, id)
-	delete(i.InterestSeen, id)
-	i.Unlock()
-}
-
-// Remove removes an interest by its Interest value. Returns true if the
-// interest was present and removed.
+// Remove removes one instance. The route is deleted only when its last
+// instance is removed. An unregister can never remove another instance's
+// registration. A legacy unregister without an InstanceID removes only the
+// legacy entry, never a newer per-instance registration.
 func (i *Interests) Remove(interest *Interest) bool {
-	id := interest.Id()
+	if interest == nil {
+		return false
+	}
+	instanceID := effectiveInstanceID(interest)
+	key := routeKey{Host: interest.Host, Path: interest.Path, Method: interest.Method}
+
 	i.Lock()
-	_, existed := i.InterestMap[id]
-	if existed {
-		delete(i.InterestMap, id)
-		delete(i.InterestSeen, id)
+	instances, routeExists := i.routes[key]
+	if !routeExists {
+		i.Unlock()
+		return false
+	}
+	if _, instanceExists := instances[instanceID]; !instanceExists {
+		i.Unlock()
+		return false
+	}
+	delete(instances, instanceID)
+	routeRemoved := len(instances) == 0
+	if routeRemoved {
+		delete(i.routes, key)
 	}
 	i.Unlock()
-	if existed {
-		slog.Info("Removed interest", "interest", interest)
+
+	if routeRemoved {
+		slog.Info("Removed interest route", "interest", interest)
+	} else {
+		slog.Debug("Removed interest instance", "interest", interest)
 	}
-	return existed
+	return routeRemoved
+}
+
+// Resolve returns the resolution for the first tier that has any instances.
+// Ordered ladder, most specific first:
+//
+//	host/path/method, host/path/*, host/*/method, host/*/*
+//
+// Conflict is evaluated only inside the winning tier. A broader tier with a
+// different key does not conflict with a more specific winner.
+func (i *Interests) Resolve(host, path, method string) Resolution {
+	candidates := []routeKey{
+		{Host: host, Path: path, Method: method},
+		{Host: host, Path: path, Method: "*"},
+		{Host: host, Path: "*", Method: method},
+		{Host: host, Path: "*", Method: "*"},
+	}
+
+	seen := make(map[routeKey]struct{}, len(candidates))
+	for _, key := range candidates {
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+
+		i.RLock()
+		instances, exists := i.routes[key]
+		if !exists || len(instances) == 0 {
+			i.RUnlock()
+			continue
+		}
+		snapshot := make([]Interest, 0, len(instances))
+		for _, entry := range instances {
+			snapshot = append(snapshot, entry.interest)
+		}
+		i.RUnlock()
+
+		return resolveSnapshot(snapshot)
+	}
+
+	return Resolution{}
+}
+
+func resolveSnapshot(instances []Interest) Resolution {
+	resolution := Resolution{Found: true, Instances: len(instances)}
+	distinctKeys := make(map[string]struct{})
+	emptyKeys := 0
+	for _, instance := range instances {
+		if instance.PublicKey == "" {
+			emptyKeys++
+			continue
+		}
+		distinctKeys[instance.PublicKey] = struct{}{}
+	}
+
+	if len(distinctKeys) > 1 || (len(distinctKeys) == 1 && emptyKeys > 0) {
+		resolution.Conflict = true
+		return resolution
+	}
+	if len(distinctKeys) == 1 {
+		for publicKey := range distinctKeys {
+			resolution.PublicKey = publicKey
+		}
+	}
+	return resolution
+}
+
+// RouteCount returns the number of distinct routes.
+func (i *Interests) RouteCount() int {
+	i.RLock()
+	defer i.RUnlock()
+	return len(i.routes)
+}
+
+// InstanceCount returns the number of live instance registrations.
+func (i *Interests) InstanceCount() int {
+	i.RLock()
+	defer i.RUnlock()
+	count := 0
+	for _, instances := range i.routes {
+		count += len(instances)
+	}
+	return count
 }

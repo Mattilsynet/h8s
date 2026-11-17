@@ -3,6 +3,7 @@ package h8sreverse
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,30 +13,68 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Mattilsynet/h8s/pkg/h8sproxy"
+	"github.com/Mattilsynet/h8s/pkg/interest"
+	"github.com/Mattilsynet/h8s/pkg/msgcrypto"
 	"github.com/Mattilsynet/h8s/pkg/subjectmapper"
+	"github.com/Mattilsynet/h8s/pkg/tracker"
 	"github.com/gorilla/websocket"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nuid"
 )
 
 // ReverseProxy forwards NATS requests to HTTP and publishes back.
 // It can subscribe to a filtered set of subjects based on the subjectmapper rules.
 
+type wsBackendConn struct {
+	conn *websocket.Conn
+	// recipient is h8sd's curve public key. Backend frames are sealed to it.
+	recipient string
+}
+
 type ReverseProxy struct {
 	nats         *nats.Conn
 	client       *http.Client
-	wsConns      sync.Map // map[string]*websocket.Conn (key is Reply subject)
+	wsConns      sync.Map // map[string]*wsBackendConn (key is Reply subject)
 	activeSubs   sync.Map // map[host][]*nats.Subscription
+	interestStop sync.Map // map[host]context.CancelFunc
 	Resolver     BackendResolver
 	FilterHost   string // Optional: Only handle requests for this host (original hostname)
 	QueueGroup   string // Optional: NATS Queue Group for load balancing
 	bufferPool   *sync.Pool
 	httpRequests chan struct{} // Admission is bounded before a worker is started.
+
+	// CryptoKey is this responder's curve keypair. With no QueueGroup it is
+	// safe to be ephemeral. With a QueueGroup every replica must configure the
+	// same seed; otherwise this instance does not advertise a key.
+	CryptoKey              *msgcrypto.Key
+	cryptoKeyExplicit      bool
+	InstanceID             string
+	InterestPublishSubject string
 }
 
 const defaultMaxConcurrentHTTPRequests = 128
 
+type Option func(*ReverseProxy)
+
+// WithCryptoKey configures the responder keypair. When a queue group is in
+// use, all replicas must pass the same key/seed.
+func WithCryptoKey(key *msgcrypto.Key) Option {
+	return func(r *ReverseProxy) {
+		r.CryptoKey = key
+		r.cryptoKeyExplicit = true
+	}
+}
+
+// WithInterestPublishSubject overrides the base interest subject.
+func WithInterestPublishSubject(subject string) Option {
+	return func(r *ReverseProxy) {
+		r.InterestPublishSubject = subject
+	}
+}
+
 // NewReverseProxy creates a proxy with a default HTTP client.
-func NewReverseProxy(nc *nats.Conn) *ReverseProxy {
+func NewReverseProxy(nc *nats.Conn, opts ...Option) *ReverseProxy {
 	// Tune HTTP Transport for high throughput
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
@@ -46,9 +85,11 @@ func NewReverseProxy(nc *nats.Conn) *ReverseProxy {
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 
-	return &ReverseProxy{
-		nats:         nc,
-		httpRequests: make(chan struct{}, defaultMaxConcurrentHTTPRequests),
+	proxy := &ReverseProxy{
+		nats:                   nc,
+		httpRequests:           make(chan struct{}, defaultMaxConcurrentHTTPRequests),
+		InstanceID:             nuid.Next(),
+		InterestPublishSubject: h8sproxy.H8SInterestControlSubject,
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   30 * time.Second,
@@ -63,6 +104,49 @@ func NewReverseProxy(nc *nats.Conn) *ReverseProxy {
 				// 32KB buffer for reasonably efficient I/O
 				return make([]byte, 32*1024)
 			},
+		},
+	}
+	for _, opt := range opts {
+		opt(proxy)
+	}
+	if proxy.CryptoKey == nil {
+		key, err := msgcrypto.Generate()
+		if err != nil {
+			slog.Error("failed to generate reverse proxy crypto key", "error", err)
+		} else {
+			proxy.CryptoKey = key
+		}
+	}
+	return proxy
+}
+
+// interestPublicKey returns the key to advertise. An ephemeral key is unsafe
+// when a queue group is configured because another replica may receive the
+// request. In that case the operator must provide a shared seed explicitly.
+func (r *ReverseProxy) interestPublicKey() string {
+	if r.CryptoKey == nil {
+		return ""
+	}
+	if r.QueueGroup != "" && !r.cryptoKeyExplicit {
+		slog.Warn("queue group is set but no shared crypto seed was configured; advertising no public key",
+			"queue_group", r.QueueGroup)
+		return ""
+	}
+	return r.CryptoKey.PublicKey()
+}
+
+func (r *ReverseProxy) newInterestPublisher(host string) *interest.Publisher {
+	return &interest.Publisher{
+		NATSConn: r.nats,
+		Subject:  r.InterestPublishSubject,
+		Entries: func() []tracker.Interest {
+			return []tracker.Interest{{
+				Host:       host,
+				Path:       "*",
+				Method:     "*",
+				PublicKey:  r.interestPublicKey(),
+				InstanceID: r.InstanceID,
+			}}
 		},
 	}
 }
@@ -113,6 +197,9 @@ func (r *ReverseProxy) SubscribeAll(ctx context.Context) error {
 
 // SubscribeForHost subscribes to subjects specific to a given hostname.
 func (r *ReverseProxy) SubscribeForHost(ctx context.Context, host string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	handler := r.messageHandler(ctx)
 	// Reverse the host using subjectmapper logic
 	req, err := http.NewRequest("GET", "http://"+host, nil)
@@ -175,11 +262,28 @@ func (r *ReverseProxy) SubscribeForHost(ctx context.Context, host string) error 
 		r.activeSubs.Store(host, subs)
 	}
 
+	// Advertise a wildcard route for this host. h8sreverse is a first-class
+	// responder: it may serve any path/method for the host.
+	if previous, ok := r.interestStop.Load(host); ok {
+		previous.(context.CancelFunc)()
+	}
+	publisherCtx, stop := context.WithCancel(ctx)
+	r.interestStop.Store(host, stop)
+	go r.newInterestPublisher(host).Run(publisherCtx)
+
 	return nil
 }
 
 // UnsubscribeForHost removes subscriptions for a given hostname.
 func (r *ReverseProxy) UnsubscribeForHost(host string) error {
+	if stop, ok := r.interestStop.Load(host); ok {
+		stop.(context.CancelFunc)()
+		r.interestStop.Delete(host)
+	}
+	// Publish unregister before removing data subscriptions so the tracker
+	// stops routing to this host immediately.
+	r.newInterestPublisher(host).Unregister()
+
 	val, ok := r.activeSubs.Load(host)
 	if !ok {
 		return nil
@@ -270,6 +374,23 @@ func (r *ReverseProxy) handleMsg(ctx context.Context, msg *nats.Msg) {
 	originalPath := msg.Header.Get("X-H8s-Original-Path")
 	originalQuery := msg.Header.Get("X-H8s-Original-Query")
 	originalProto := msg.Header.Get("X-H8s-Original-Proto")
+	from := msg.Header.Get(h8sproxy.H8SFromHeaderName)
+
+	body := msg.Data
+	if from != "" {
+		if r.CryptoKey == nil {
+			slog.Error("received sealed request but reverse proxy has no crypto key", "subject", msg.Subject)
+			r.publishError(msg, http.StatusInternalServerError, "encryption is not configured")
+			return
+		}
+		plaintext, openErr := r.CryptoKey.Open(body, from)
+		if openErr != nil {
+			slog.Error("failed to open request body", "error", openErr, "subject", msg.Subject)
+			r.publishError(msg, http.StatusBadRequest, "invalid encrypted request")
+			return
+		}
+		body = plaintext
+	}
 
 	if hostHeader != "" {
 		// Case 1: We have the Host header. This is the happy path.
@@ -375,7 +496,7 @@ func (r *ReverseProxy) handleMsg(ctx context.Context, msg *nats.Msg) {
 	}
 	requestURL.RawQuery = originalQuery
 
-	req, err := http.NewRequestWithContext(ctx, method, requestURL.String(), bytes.NewReader(msg.Data))
+	req, err := http.NewRequestWithContext(ctx, method, requestURL.String(), bytes.NewReader(body))
 	if err != nil {
 		slog.Error("new request", "error", err)
 		return
@@ -438,33 +559,34 @@ func (r *ReverseProxy) handleMsg(ctx context.Context, msg *nats.Msg) {
 			msgData := make([]byte, n)
 			copy(msgData, buf[:n])
 
-			respMsg := &nats.Msg{
-				Subject: msg.Reply,
-				Data:    msgData,
-			}
+			chunkHeader := nats.Header(nil)
 			if first {
-				respMsg.Header = header
+				chunkHeader = header
 				first = false
 			}
-			r.nats.PublishMsg(respMsg)
+			if err := r.publishResponse(msg.Reply, msgData, chunkHeader, from); err != nil {
+				slog.Error("failed to publish response chunk", "error", err, "reply", msg.Reply)
+				return
+			}
 		}
 
 		if err != nil {
 			if err == io.EOF {
-				// Send empty message to close the stream on h8sproxy side
-				// If first is still true (empty body), we must attach headers here
-				finishMsg := &nats.Msg{
-					Subject: msg.Reply,
-					Data:    []byte{},
-				}
+				// Send an empty plaintext message to close the stream on the
+				// h8sproxy side. If it is the first message, attach headers.
+				finishHeader := nats.Header(nil)
 				if first {
-					finishMsg.Header = header
+					finishHeader = header
 				}
-				r.nats.PublishMsg(finishMsg)
+				if pubErr := r.publishResponse(msg.Reply, []byte{}, finishHeader, from); pubErr != nil {
+					slog.Error("failed to publish response EOF", "error", pubErr, "reply", msg.Reply)
+				}
 			} else {
 				slog.Error("read body error", "error", err)
 				// Best effort close
-				r.nats.PublishMsg(&nats.Msg{Subject: msg.Reply, Data: []byte{}})
+				if pubErr := r.publishResponse(msg.Reply, []byte{}, nil, from); pubErr != nil {
+					slog.Error("failed to publish response close", "error", pubErr, "reply", msg.Reply)
+				}
 			}
 			break
 		}
@@ -497,15 +619,10 @@ func removeHopByHopHeaders(h http.Header) {
 }
 
 func removeInternalHeaders(h http.Header) {
-	for _, header := range []string{
-		"X-H8s-Original-Query",
-		"X-H8s-Original-Host",
-		"X-H8s-Original-Path",
-		"X-H8s-Original-Proto",
-		"X-H8s-ReplySubject",
-		"X-H8s-Connection-Close-Subject",
-	} {
-		h.Del(header)
+	for key := range h {
+		if strings.HasPrefix(strings.ToLower(key), "x-h8s-") {
+			h.Del(key)
+		}
 	}
 }
 
@@ -520,21 +637,45 @@ func joinURLPath(basePath, requestPath string) string {
 	}
 }
 
-func (r *ReverseProxy) publishError(msg *nats.Msg, code int, errStr string) {
-	respMsg := &nats.Msg{
-		Subject: msg.Reply,
-		Data:    []byte(errStr),
-		Header:  nats.Header{},
+// publishResponse seals data when recipient is set, then publishes one NATS
+// message. Content-Length headers, when present, describe plaintext length.
+func (r *ReverseProxy) publishResponse(subject string, data []byte, header nats.Header, recipient string) error {
+	if recipient != "" {
+		if r.CryptoKey == nil {
+			return errors.New("reverse proxy crypto key is not configured")
+		}
+		sealed, err := r.CryptoKey.Seal(data, recipient)
+		if err != nil {
+			return err
+		}
+		data = sealed
 	}
-	respMsg.Header.Set("Status", strconv.Itoa(code))
-	respMsg.Header.Set("Status-Code", strconv.Itoa(code))
+	return r.nats.PublishMsg(&nats.Msg{Subject: subject, Data: data, Header: header})
+}
+
+func (r *ReverseProxy) publishError(msg *nats.Msg, code int, errStr string) {
+	recipient := msg.Header.Get(h8sproxy.H8SFromHeaderName)
+	body := []byte(errStr)
+
+	header := nats.Header{}
+	header.Set("Status", strconv.Itoa(code))
+	header.Set("Status-Code", strconv.Itoa(code))
 	// Error replies are finite single messages, not unterminated streams.
-	respMsg.Header.Set("Content-Type", "text/plain; charset=utf-8")
-	respMsg.Header.Set("Content-Length", strconv.Itoa(len(respMsg.Data)))
-	r.nats.PublishMsg(respMsg)
+	header.Set("Content-Type", "text/plain; charset=utf-8")
+	header.Set("Content-Length", strconv.Itoa(len(body)))
+
+	if err := r.publishResponse(msg.Reply, body, header, recipient); err != nil {
+		slog.Error("failed to publish error response", "error", err, "reply", msg.Reply)
+	}
 }
 
 func (r *ReverseProxy) handleControlEstablished(msg *nats.Msg) {
+	recipient := msg.Header.Get(h8sproxy.H8SFromHeaderName)
+	if recipient != "" && r.CryptoKey == nil {
+		slog.Error("received sealed WebSocket control message but reverse proxy has no crypto key")
+		return
+	}
+
 	// Filter by host if configured
 	hostHeader := msg.Header.Get("X-H8s-Original-Host")
 	if hostHeader == "" {
@@ -636,7 +777,7 @@ func (r *ReverseProxy) handleControlEstablished(msg *nats.Msg) {
 	// Forward headers using Add/Set but filtering specific connection headers
 	headers := http.Header{}
 	for k, v := range msg.Header {
-		if strings.HasPrefix(k, "X-H8s-") {
+		if strings.HasPrefix(strings.ToLower(k), "x-h8s-") {
 			continue
 		}
 		// Skip headers managed by Dial
@@ -677,8 +818,9 @@ func (r *ReverseProxy) handleControlEstablished(msg *nats.Msg) {
 		return
 	}
 
-	// Store connection mapping: ReplySubject -> *websocket.Conn
-	r.wsConns.Store(msg.Reply, wsConn)
+	// Store connection mapping: ReplySubject -> backend connection + h8sd key.
+	state := &wsBackendConn{conn: wsConn, recipient: recipient}
+	r.wsConns.Store(msg.Reply, state)
 	slog.Info("handleControlEstablished: connected", "url", targetURL.Redacted(), "reply", msg.Reply)
 
 	// Pump messages from backend -> NATS
@@ -693,7 +835,10 @@ func (r *ReverseProxy) handleControlEstablished(msg *nats.Msg) {
 				slog.Info("backend ws read error", "err", err)
 				break
 			}
-			r.nats.Publish(msg.Reply, message)
+			if err := r.publishResponse(msg.Reply, message, nil, recipient); err != nil {
+				slog.Error("failed to seal WebSocket frame", "error", err, "reply", msg.Reply)
+				break
+			}
 		}
 	}()
 }
@@ -701,8 +846,8 @@ func (r *ReverseProxy) handleControlEstablished(msg *nats.Msg) {
 func (r *ReverseProxy) handleControlClosed(msg *nats.Msg) {
 	slog.Info("handleControlClosed", "reply", msg.Reply)
 	if val, ok := r.wsConns.Load(msg.Reply); ok {
-		if conn, ok := val.(*websocket.Conn); ok {
-			conn.Close()
+		if state, ok := val.(*wsBackendConn); ok && state.conn != nil {
+			state.conn.Close()
 		}
 		r.wsConns.Delete(msg.Reply)
 	}
@@ -717,11 +862,33 @@ func (r *ReverseProxy) handleWebSocketFrame(msg *nats.Msg) {
 		// slog.Warn("handleWebSocketFrame: connection not found", "reply", msg.Reply)
 		return
 	}
-	conn := val.(*websocket.Conn)
-	err := conn.WriteMessage(websocket.TextMessage, msg.Data)
+	state, ok := val.(*wsBackendConn)
+	if !ok || state.conn == nil {
+		return
+	}
+
+	data := msg.Data
+	if state.recipient != "" {
+		if from := msg.Header.Get(h8sproxy.H8SFromHeaderName); from != "" && from != state.recipient {
+			slog.Error("handleWebSocketFrame: sender key does not match established session", "reply", msg.Reply)
+			return
+		}
+		if r.CryptoKey == nil {
+			slog.Error("handleWebSocketFrame: sealed frame but no crypto key configured", "reply", msg.Reply)
+			return
+		}
+		plaintext, err := r.CryptoKey.Open(data, state.recipient)
+		if err != nil {
+			slog.Error("handleWebSocketFrame: failed to open frame", "error", err, "reply", msg.Reply)
+			return
+		}
+		data = plaintext
+	}
+
+	err := state.conn.WriteMessage(websocket.TextMessage, data)
 	if err != nil {
 		slog.Error("handleWebSocketFrame: write error", "error", err)
-		conn.Close()
+		state.conn.Close()
 		r.wsConns.Delete(msg.Reply)
 	}
 }

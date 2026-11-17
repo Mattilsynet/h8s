@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Mattilsynet/h8s/pkg/h8sreverse"
+	"github.com/Mattilsynet/h8s/pkg/msgcrypto"
 	"github.com/Mattilsynet/othell/pkg/othell"
 	"github.com/nats-io/nats.go"
 	"go.opentelemetry.io/otel/attribute"
@@ -27,15 +28,16 @@ type NATSConnectionOptions struct {
 }
 
 var (
-	NATSOptions     NATSConnectionOptions
-	natsURLFlag     = flag.String("nats-url", getEnv("NATS_URL", "nats://0.0.0.0:4222"), "NATS server URL")
-	natsCredsFlag   = flag.String("nats-creds", getEnv("NATS_CREDS_PATH", ""), "Path to NATS credentials file (optional)")
-	otelEnabledFlag = flag.Bool("otel-enabled", getEnvBool("OTEL_ENABLED", false), "Enable OpenTelemetry tracing and metrics")
-	otelEndpoint    = flag.String("otel-endpoint", getEnv("OTEL_ENDPOINT", ""), "")
-	otel            = &othell.Othell{}
-	hostnameFlag    = flag.String("hostname", getEnv("H8SRD_HOSTNAME", ""), "Public hostname to listen for (required)")
-	backendURLFlag  = flag.String("backend-url", getEnv("H8SRD_BACKEND_URL", ""), "URL of the local backend service (e.g. http://localhost:8080)")
-	queueGroupFlag  = flag.String("queue-group", getEnv("H8SRD_QUEUE_GROUP", ""), "NATS Queue Group for load balancing")
+	NATSOptions        NATSConnectionOptions
+	natsURLFlag        = flag.String("nats-url", getEnv("NATS_URL", "nats://0.0.0.0:4222"), "NATS server URL")
+	natsCredsFlag      = flag.String("nats-creds", getEnv("NATS_CREDS_PATH", ""), "Path to NATS credentials file (optional)")
+	otelEnabledFlag    = flag.Bool("otel-enabled", getEnvBool("OTEL_ENABLED", false), "Enable OpenTelemetry tracing and metrics")
+	otelEndpoint       = flag.String("otel-endpoint", getEnv("OTEL_ENDPOINT", ""), "")
+	otel               = &othell.Othell{}
+	hostnameFlag       = flag.String("hostname", getEnv("H8SRD_HOSTNAME", ""), "Public hostname to listen for (required)")
+	backendURLFlag     = flag.String("backend-url", getEnv("H8SRD_BACKEND_URL", ""), "URL of the local backend service (e.g. http://localhost:8080)")
+	queueGroupFlag     = flag.String("queue-group", getEnv("H8SRD_QUEUE_GROUP", ""), "NATS Queue Group for load balancing")
+	cryptoSeedFileFlag = flag.String("crypto-seed-file", getEnv("H8SRD_CRYPTO_SEED_FILE", ""), "Path to an nkeys curve seed (SX...). Required for crypto with a queue group.")
 )
 
 func getEnv(key, fallback string) string {
@@ -142,7 +144,19 @@ func main() {
 	}
 
 	// Create and start the reverse proxy
-	proxy := h8sreverse.NewReverseProxy(nc)
+	var proxyOptions []h8sreverse.Option
+	if *cryptoSeedFileFlag != "" {
+		key, err := msgcrypto.FromSeedFile(*cryptoSeedFileFlag)
+		if err != nil {
+			slog.Error("Failed to load crypto seed", "error", err)
+			os.Exit(1)
+		}
+		defer key.Wipe()
+		proxyOptions = append(proxyOptions, h8sreverse.WithCryptoKey(key))
+		slog.Info("Using configured reverse proxy crypto key", "public_key", key.PublicKey())
+	}
+	proxy := h8sreverse.NewReverseProxy(nc, proxyOptions...)
+	defer proxy.CryptoKey.Wipe()
 
 	proxy.FilterHost = *hostnameFlag
 	if *queueGroupFlag != "" {

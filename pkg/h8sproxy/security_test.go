@@ -123,9 +123,10 @@ func TestInterestOnlyMode_AllowsRegisteredInterest(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, w.Code)
 
 	interest := tracker.Interest{
-		Host:   "allowed.com",
-		Path:   "/ping",
-		Method: "GET",
+		Host:       "allowed.com",
+		Path:       "/ping",
+		Method:     "GET",
+		InstanceID: "i1",
 	}
 	data, err := json.Marshal(interest)
 	require.NoError(t, err)
@@ -133,10 +134,7 @@ func TestInterestOnlyMode_AllowsRegisteredInterest(t *testing.T) {
 	require.NoError(t, nc.FlushTimeout(1*time.Second))
 
 	require.Eventually(t, func() bool {
-		interestTracker.Interests.RLock()
-		defer interestTracker.Interests.RUnlock()
-		_, ok := interestTracker.Interests.InterestMap[interest.Id()]
-		return ok
+		return interestTracker.ResolveRoute(interest.Host, interest.Path, interest.Method).Found
 	}, time.Second, 10*time.Millisecond)
 
 	req = httptest.NewRequest(http.MethodGet, "http://allowed.com/ping", nil)
@@ -205,17 +203,14 @@ func TestInterestSubjectAlignment(t *testing.T) {
 	proxy := NewH8Sproxy(nc, WithInterestOnly(), WithInterestTracker(interestTracker))
 	handler := http.HandlerFunc(proxy.Handler)
 
-	interest := tracker.Interest{Host: "aligned.com", Path: "/ping", Method: "GET"}
+	interest := tracker.Interest{Host: "aligned.com", Path: "/ping", Method: "GET", InstanceID: "i1"}
 	payload, err := json.Marshal(interest)
 	require.NoError(t, err)
 	require.NoError(t, nc.Publish(H8SInterestControlSubject+".register.com.aligned", payload))
 	require.NoError(t, nc.FlushTimeout(1*time.Second))
 
 	require.Eventually(t, func() bool {
-		interestTracker.Interests.RLock()
-		defer interestTracker.Interests.RUnlock()
-		_, ok := interestTracker.Interests.InterestMap[interest.Id()]
-		return ok
+		return interestTracker.ResolveRoute(interest.Host, interest.Path, interest.Method).Found
 	}, time.Second, 10*time.Millisecond)
 
 	req := httptest.NewRequest(http.MethodGet, "http://aligned.com/ping", nil)

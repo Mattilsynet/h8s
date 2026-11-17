@@ -109,7 +109,9 @@ func (w *websocketThingy) Writer() {
 			for _, conn := range w.WebsocketHandler.GetWSConnsBySubject(w.WebsocketHandler.ReceiveSubject) {
 				slog.Info("connection:", "conn", conn)
 				payload := []byte("Hello from WebSocket server!")
-				w.WebsocketHandler.NatsConn.Publish(conn, payload)
+				if err := w.WebsocketHandler.Publish(conn, payload); err != nil {
+					slog.Error("failed to publish WebSocket message", "error", err)
+				}
 			}
 			// Optional: small sleep to prevent 100% CPU if idle
 			time.Sleep(1 * time.Second)
