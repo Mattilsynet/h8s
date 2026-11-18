@@ -25,7 +25,9 @@ import (
 	"github.com/nats-io/nuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -538,7 +540,15 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	_, span := h8s.OTELTracer.Start(req.Context(), "request")
+	ctx, span := h8s.OTELTracer.Start(req.Context(), "request",
+		trace.WithAttributes(
+			attribute.String("http.request.method", req.Method),
+			attribute.String("url.path", req.URL.Path),
+			attribute.String("url.query", req.URL.RawQuery),
+			attribute.String("server.address", req.Host),
+			attribute.String("user_agent.original", req.Header.Get("User-Agent")),
+		),
+	)
 	defer span.End()
 
 	// Scheme is not set in request, which is strange, we'll enforce that here.
@@ -547,7 +557,7 @@ func (h8s *H8Sproxy) Handler(res http.ResponseWriter, req *http.Request) {
 	// Enforce MaxBytesReader to prevent DoS via large bodies
 	req.Body = http.MaxBytesReader(res, req.Body, h8s.MaxBodySize)
 
-	msg := httpRequestToNATSMessage(req)
+	msg := httpRequestToNATSMessage(ctx, req)
 
 	if resolution.PublicKey != "" {
 		sealed, err := h8s.CryptoKey.Seal(msg.Data, resolution.PublicKey)
@@ -652,8 +662,12 @@ loop:
 			removeH8SHeaders(http.Header(rm.Header))
 
 			if !wroteHeaders {
-				copyHeadersOnce(res, rm.Header)
+				statusCode := copyHeadersOnce(res, rm.Header)
 				wroteHeaders = true
+				if statusCode >= 400 {
+					span.SetStatus(codes.Error, http.StatusText(statusCode))
+				}
+				span.SetAttributes(attribute.Int("http.response.status_code", statusCode))
 			}
 
 			// Responses with header Content-Length set are treated as single responses.
@@ -906,7 +920,7 @@ func (h8s *H8Sproxy) cmConnectionClosed(secKey string) {
 	)
 }
 
-func httpRequestToNATSMessage(req *http.Request) *nats.Msg {
+func httpRequestToNATSMessage(ctx context.Context, req *http.Request) *nats.Msg {
 	sm := subjectmapper.NewSubjectMap(req)
 	msg := nats.NewMsg(sm.PublishSubject())
 	msg.Reply = fmt.Sprintf("%v.%v", sm.InboxSubjectPrefix(), nuid.Next())
@@ -921,6 +935,10 @@ func httpRequestToNATSMessage(req *http.Request) *nats.Msg {
 		}
 	}
 	removeHopByHopHeaders(http.Header(msg.Header))
+
+	// Carry the current span into the upstream request so downstream hosts
+	// join this distributed trace (W3C traceparent header).
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(msg.Header))
 
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
@@ -1016,7 +1034,7 @@ func appendForwardedFor(h http.Header, remoteAddr string) {
 
 // CopyHeadersOnce copies relevant headers from a NATS reply message
 // to the http.ResponseWriter and writes the status code immediately.
-func copyHeadersOnce(res http.ResponseWriter, h nats.Header) {
+func copyHeadersOnce(res http.ResponseWriter, h nats.Header) int {
 	statusCode := http.StatusOK
 
 	if s := h.Get("Status-Code"); s != "" {
@@ -1052,4 +1070,5 @@ func copyHeadersOnce(res http.ResponseWriter, h nats.Header) {
 	}
 
 	res.WriteHeader(statusCode)
+	return statusCode
 }

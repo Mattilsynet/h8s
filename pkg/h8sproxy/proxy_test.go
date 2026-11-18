@@ -120,7 +120,7 @@ func TestHttpReqToNATS_RequestReply_HeaderPropagation(t *testing.T) {
 				Header: tt.headers,
 				Body:   http.NoBody,
 			}
-			msg := httpRequestToNATSMessage(req)
+			msg := httpRequestToNATSMessage(context.Background(), req)
 
 			replySub, err := nc.SubscribeSync(msg.Reply)
 			require.NoError(t, err)
@@ -146,7 +146,7 @@ func TestHTTPRequestToNATSMessagePreservesOriginalRequestMetadata(t *testing.T) 
 	req.Header.Set("Keep-Alive", "timeout=5")
 	req.Header.Set("X-Remove-Me", "yes")
 
-	msg := httpRequestToNATSMessage(req)
+	msg := httpRequestToNATSMessage(context.Background(), req)
 
 	require.Equal(t, "grafana.example.com", msg.Header.Get(H8SOriginalHostHTTPHeaderName))
 	require.Equal(t, "/grafana/public/build/app%2Ejs/", msg.Header.Get(H8SOriginalPathHTTPHeaderName))
